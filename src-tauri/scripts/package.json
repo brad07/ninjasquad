@@ -1,0 +1,8 @@
+{
+  "name": "ninjasquad-sdk-scripts",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "@opencode-ai/sdk": "^0.11.8"
+  }
+}

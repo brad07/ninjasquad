@@ -1,13 +1,16 @@
 import React, { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { PaperAirplaneIcon } from '@heroicons/react/24/outline';
+import { opencodeSDKService } from '../services/OpenCodeSDKService';
 import type { OrchestratorSession } from '../types';
+import type { ServerMode } from './ModeToggle';
 
 interface TaskDistributionProps {
   sessions: OrchestratorSession[];
+  serverMode: ServerMode;
 }
 
-const TaskDistribution: React.FC<TaskDistributionProps> = ({ sessions }) => {
+const TaskDistribution: React.FC<TaskDistributionProps> = ({ sessions, serverMode }) => {
   const [prompt, setPrompt] = useState('');
   const [isDistributing, setIsDistributing] = useState(false);
   const [strategy, setStrategy] = useState<'RoundRobin' | 'Random' | 'LeastLoaded'>('RoundRobin');
@@ -17,9 +20,39 @@ const TaskDistribution: React.FC<TaskDistributionProps> = ({ sessions }) => {
 
     setIsDistributing(true);
     try {
-      const taskId = await invoke<string>('distribute_task', { prompt, strategy });
-      alert(`Task distributed successfully! Task ID: ${taskId}`);
-      setPrompt('');
+      if (serverMode === 'sdk') {
+        // SDK Mode: Actually send prompt to a session
+        const extendedSessions = opencodeSDKService.listSDKSessions();
+        const idleSession = extendedSessions.find(s => s.status === 'Idle');
+
+        if (!idleSession) {
+          alert('No SDK sessions available. Please create a session from a running SDK server first.');
+          return;
+        }
+
+        const response = await opencodeSDKService.sendPromptToSession(idleSession.session.id, prompt);
+        console.log('SDK Prompt response:', response);
+        console.log('Session:', idleSession.session);
+
+        // Log available models if we have them
+        const server = opencodeSDKService.getSDKServer(idleSession.serverId);
+        if (server?.config?.model) {
+          console.log('Available model:', server.config.model);
+        }
+
+        alert(`Prompt sent to session "${idleSession.session.title}"! Check the Sessions tab to see the response.`);
+        setPrompt('');
+
+        // Refresh sessions to show the updated response
+        if (window.loadSessions) {
+          window.loadSessions();
+        }
+      } else {
+        // Process Mode: Use existing Tauri command
+        const taskId = await invoke<string>('distribute_task', { prompt, strategy });
+        alert(`Task distributed successfully! Task ID: ${taskId}`);
+        setPrompt('');
+      }
     } catch (error) {
       console.error('Failed to distribute task:', error);
       alert(`Failed to distribute task: ${error}`);
@@ -29,6 +62,8 @@ const TaskDistribution: React.FC<TaskDistributionProps> = ({ sessions }) => {
   };
 
   const availableSessions = sessions.filter(s => s.status === 'Idle').length;
+  const extendedSessions = serverMode === 'sdk' ? opencodeSDKService.listSDKSessions() : [];
+  const availableSDKSessions = extendedSessions.filter(s => s.status === 'Idle').length;
 
   return (
     <div className="space-y-6">
@@ -66,11 +101,15 @@ const TaskDistribution: React.FC<TaskDistributionProps> = ({ sessions }) => {
 
           <div className="flex items-center justify-between">
             <p className="text-sm text-gray-600 dark:text-gray-400">
-              Available sessions: {availableSessions} / {sessions.length}
+              {serverMode === 'sdk' ? (
+                <>SDK Sessions: {availableSDKSessions} / {extendedSessions.length}</>
+              ) : (
+                <>Available sessions: {availableSessions} / {sessions.length}</>
+              )}
             </p>
             <button
               onClick={distributeTask}
-              disabled={isDistributing || availableSessions === 0 || !prompt.trim()}
+              disabled={isDistributing || (serverMode === 'sdk' ? availableSDKSessions === 0 : availableSessions === 0) || !prompt.trim()}
               className="btn-primary flex items-center gap-2"
             >
               <PaperAirplaneIcon className="h-5 w-5" />

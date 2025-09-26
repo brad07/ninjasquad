@@ -8,6 +8,14 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  // Resolve configuration for @opencode-ai/sdk
+  resolve: {
+    alias: {
+      '@opencode-ai/sdk/client': new URL('./node_modules/@opencode-ai/sdk/dist/client.js', import.meta.url).pathname,
+      '@opencode-ai/sdk': new URL('./node_modules/@opencode-ai/sdk/dist/index.js', import.meta.url).pathname
+    }
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

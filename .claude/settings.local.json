@@ -1,7 +1,26 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo clean:*)"
+      "Bash(cargo clean:*)",
+      "Bash(npm run tauri:*)",
+      "Bash(lsof:*)",
+      "Bash(npm run typecheck:*)",
+      "Bash(npx tsc:*)",
+      "Bash(kill:*)",
+      "Bash(awk:*)",
+      "Bash(xargs kill:*)",
+      "Bash(curl:*)",
+      "Bash(opencode:*)",
+      "Bash(pkill:*)",
+      "Bash(system_profiler:*)",
+      "WebFetch(domain:opencode.ai)",
+      "Bash(npm install:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(cat:*)",
+      "Bash(cargo:*)",
+      "Bash(node:*)",
+      "WebSearch",
+      "WebFetch(domain:github.com)"
     ],
     "deny": [],
     "ask": []

@@ -5,14 +5,16 @@ interface ServerCardProps {
   server: OpenCodeServer;
   onStop?: () => void;
   onRestart?: () => void;
-  onHealthCheck?: () => void;
+  onCreateSession?: () => void;
+  onOpenTerminal?: () => void;
 }
 
 export const ServerCard: React.FC<ServerCardProps> = ({
   server,
   onStop,
   onRestart,
-  onHealthCheck,
+  onCreateSession,
+  onOpenTerminal,
 }) => {
   const getStatusColor = () => {
     if (typeof server.status === 'string') {
@@ -41,8 +43,13 @@ export const ServerCard: React.FC<ServerCardProps> = ({
           <p className="text-sm text-gray-600 dark:text-gray-400">{server.id}</p>
         </div>
         <div className="flex items-center">
-          <span className={`w-3 h-3 rounded-full ${getStatusColor()} mr-2`}></span>
+          <span className={`w-3 h-3 rounded-full ${getStatusColor()} mr-2 animate-pulse`}></span>
           <span className="text-sm text-gray-700 dark:text-gray-300">{getStatusText()}</span>
+          {server.status === 'Running' && (
+            <span className="ml-2 text-xs text-gray-500" title="Auto health check every 5s">
+              ⟳
+            </span>
+          )}
         </div>
       </div>
 
@@ -60,7 +67,7 @@ export const ServerCard: React.FC<ServerCardProps> = ({
         )}
       </div>
 
-      <div className="server-actions mt-4 flex gap-2">
+      <div className="server-actions mt-4 flex gap-2 flex-wrap">
         {server.status === 'Running' && (
           <>
             <button
@@ -71,11 +78,19 @@ export const ServerCard: React.FC<ServerCardProps> = ({
               Stop
             </button>
             <button
-              onClick={onHealthCheck}
-              className="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600"
-              data-testid="health-check-button"
+              onClick={() => onCreateSession && onCreateSession()}
+              className="px-3 py-1 bg-green-500 text-white rounded text-sm hover:bg-green-600"
+              data-testid="create-session-button"
             >
-              Health Check
+              Create Session
+            </button>
+            <button
+              onClick={() => onOpenTerminal && onOpenTerminal()}
+              className="px-3 py-1 bg-blue-500 text-white rounded text-sm hover:bg-blue-600"
+              data-testid="open-terminal-button"
+              title="Open WezTerm with OpenCode TUI connected to this server"
+            >
+              Open Terminal
             </button>
           </>
         )}

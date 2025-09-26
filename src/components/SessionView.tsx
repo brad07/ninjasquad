@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { TerminalView } from './TerminalView';
+import SessionDetails from './SessionDetails';
+import { opencodeSDKService } from '../services/OpenCodeSDKService';
 import type { OrchestratorSession } from '../types';
 
 interface SessionViewProps {
@@ -15,8 +16,24 @@ const SessionView: React.FC<SessionViewProps> = ({ sessions, onSessionsUpdate })
 
   const loadSessions = async () => {
     try {
-      const sessionList = await invoke<OrchestratorSession[]>('list_sessions');
-      onSessionsUpdate(sessionList);
+      // Get Process Mode sessions from Tauri
+      const tauriSessions = await invoke<OrchestratorSession[]>('list_sessions');
+
+      // Get SDK Mode sessions
+      const sdkSessions = opencodeSDKService.listSDKSessions();
+
+      // Convert SDK sessions to OrchestratorSession format
+      const sdkOrchestratorSessions: OrchestratorSession[] = sdkSessions.map(extSession => ({
+        id: extSession.session.id,
+        server_id: extSession.serverId,
+        status: extSession.status,
+        task: undefined,
+        agent_id: extSession.session.id
+      }));
+
+      // Combine both lists
+      const allSessions = [...tauriSessions, ...sdkOrchestratorSessions];
+      onSessionsUpdate(allSessions);
     } catch (error) {
       console.error('Failed to load sessions:', error);
     }
@@ -40,13 +57,11 @@ const SessionView: React.FC<SessionViewProps> = ({ sessions, onSessionsUpdate })
         </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 gap-4">
         {sessions.map((session) => (
-          <TerminalView
+          <SessionDetails
             key={session.id}
             session={session}
-            output=""
-            onInput={(input) => handleInput(session.id, input)}
           />
         ))}
       </div>

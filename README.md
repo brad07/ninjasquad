@@ -1,10 +1,10 @@
-# OpenCode Terminal Orchestrator
+# Ninja Squad
 
-A Tauri-based application for orchestrating multiple OpenCode.ai terminal instances across local and remote machines using WezTerm's multiplexer capabilities.
+A Tauri-based application for orchestrating multiple OpenCode.ai terminal instances across local and remote machines, enabling coordinated task execution and team collaboration.
 
 ## Architecture Overview
 
-The application follows a Test-Driven Development (TDD) approach with three main layers:
+Ninja Squad coordinates multiple AI agents working together as a team. The application has three main layers:
 
 ### Backend (Rust/Tauri)
 - **OpenCode Service**: Manages OpenCode server instances, spawning, health checks, and API communication
@@ -24,7 +24,7 @@ The application follows a Test-Driven Development (TDD) approach with three main
 ## Project Structure
 
 ```
-opencode-orchestrator/
+ninjasquad/
 ├── src-tauri/              # Rust backend
 │   ├── src/
 │   │   ├── opencode/       # OpenCode service layer

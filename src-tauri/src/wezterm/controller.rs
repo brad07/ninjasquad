@@ -174,6 +174,71 @@ impl WezTermController {
     pub async fn list_sessions(&self) -> Vec<WezTermSession> {
         self.sessions.read().await.values().cloned().collect()
     }
+
+    pub async fn spawn_opencode_terminal(&self, host: &str, port: u16) -> Result<(), String> {
+        // Try to get an existing session or create one, then launch OpenCode TUI
+        let terminal_cmd = format!(
+            r#"unset npm_config_prefix && \
+            echo -e '\033[1;36m========================================\033[0m' && \
+            echo -e '\033[1;33mConnecting to OpenCode Server\033[0m' && \
+            echo -e '\033[1;36m========================================\033[0m' && \
+            echo -e '' && \
+            echo -e '\033[1;32mServer:\033[0m http://{}:{}' && \
+            echo -e '' && \
+            echo -e 'Fetching available sessions...' && \
+            echo -e '' && \
+            SESSIONS=$(curl -s http://{}:{}/session 2>/dev/null | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4) && \
+            if [ -n "$SESSIONS" ]; then \
+                echo -e '\033[1;32mFound session:\033[0m' $SESSIONS && \
+                echo -e 'Launching OpenCode TUI...' && \
+                echo -e '' && \
+                OPENCODE_API_URL='http://{}:{}' opencode --session $SESSIONS; \
+            else \
+                echo -e '\033[1;33mNo sessions found. Starting new OpenCode instance...\033[0m' && \
+                echo -e '' && \
+                echo -e '\033[1;34mUseful commands:\033[0m' && \
+                echo -e '  • \033[0;36mcurl http://{}:{}/config\033[0m - View server config' && \
+                echo -e '  • \033[0;36mcurl http://{}:{}/session\033[0m - List sessions' && \
+                echo -e '  • \033[0;36mopencode\033[0m - Start new OpenCode TUI (separate server)' && \
+                echo -e '' && \
+                echo -e '\033[1;36m========================================\033[0m' && \
+                echo -e '' && \
+                exec bash; \
+            fi"#,
+            host, port, host, port, host, port, host, port, host, port
+        );
+
+        println!("Spawning WezTerm with server info for {}:{}", host, port);
+
+        // Use WezTerm to create a new window running the OpenCode TUI
+        // Use --always-new-process to force a new window
+        let child = Command::new("wezterm")
+            .arg("start")
+            .arg("--always-new-process")  // Force new window
+            .arg("--")
+            .arg("bash")
+            .arg("-c")
+            .arg(&terminal_cmd)
+            .spawn()
+            .map_err(|e| format!("Failed to spawn WezTerm: {}. Make sure WezTerm is installed.", e))?;
+
+        println!("WezTerm spawned with PID: {:?}", child.id());
+
+        // Wait a moment to ensure the window has time to appear
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+        // Try to bring the window to front using AppleScript on macOS
+        #[cfg(target_os = "macos")]
+        {
+            let _ = Command::new("osascript")
+                .arg("-e")
+                .arg("tell application \"WezTerm\" to activate")
+                .output()
+                .await;
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

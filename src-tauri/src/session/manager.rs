@@ -11,7 +11,7 @@ use rand::seq::SliceRandom;
 pub struct SessionManager {
     sessions: Arc<RwLock<HashMap<String, OrchestratorSession>>>,
     opencode_service: Arc<OpenCodeService>,
-    wezterm_controller: Arc<WezTermController>,
+    _wezterm_controller: Arc<WezTermController>,
     distribution_strategy: DistributionStrategy,
     round_robin_index: Arc<RwLock<usize>>,
     pending_tasks: Arc<RwLock<VecDeque<Task>>>,
@@ -25,7 +25,7 @@ impl SessionManager {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             opencode_service,
-            wezterm_controller,
+            _wezterm_controller: wezterm_controller,
             distribution_strategy: DistributionStrategy::RoundRobin,
             round_robin_index: Arc::new(RwLock::new(0)),
             pending_tasks: Arc::new(RwLock::new(VecDeque::new())),
@@ -33,23 +33,27 @@ impl SessionManager {
     }
 
     pub async fn register_session(&self, opencode_server_id: String) -> Result<OrchestratorSession, String> {
+        println!("SessionManager: Creating session for server {}", opencode_server_id);
         let session_id = format!("session-{}", Uuid::new_v4());
 
         let session = OrchestratorSession {
             id: session_id.clone(),
-            opencode_server_id,
+            opencode_server_id: opencode_server_id.clone(),
             wezterm_pane_id: None,
             status: SessionStatus::Idle,
             created_at: Utc::now().to_rfc3339(),
             task: None,
         };
 
-        self.sessions.write().await.insert(session_id, session.clone());
+        println!("SessionManager: Storing session {} in map", session_id);
+        self.sessions.write().await.insert(session_id.clone(), session.clone());
 
+        println!("SessionManager: Session created - ID: {}, Server: {}", session.id, opencode_server_id);
         Ok(session)
     }
 
     pub async fn distribute_task(&self, prompt: String) -> Result<String, String> {
+        println!("SessionManager: Starting task distribution for prompt: {}", prompt);
         let task_id = format!("task-{}", Uuid::new_v4());
 
         let task = Task {
@@ -61,21 +65,32 @@ impl SessionManager {
         };
 
         // Find an available session
+        println!("SessionManager: Finding available session...");
         let available_session = self.find_available_session().await?;
+        println!("SessionManager: Found available session: {}", available_session);
 
         // Assign task to session
         let mut sessions = self.sessions.write().await;
         if let Some(session) = sessions.get_mut(&available_session) {
+            println!("SessionManager: Assigning task to session {}", session.id);
             session.task = Some(task.clone());
             session.status = SessionStatus::Working;
 
             // Send prompt to OpenCode server
+            println!("SessionManager: Looking for OpenCode server {}", session.opencode_server_id);
             if let Some(server) = self.opencode_service.get_server(&session.opencode_server_id).await {
+                println!("SessionManager: Found server at {}:{}", server.host, server.port);
                 let client = OpenCodeApiClient::new(&server.host, server.port);
-                let _ = client.send_prompt(&prompt).await;
+                match client.send_prompt(&prompt).await {
+                    Ok(_) => println!("SessionManager: Successfully sent prompt to OpenCode server"),
+                    Err(e) => println!("SessionManager: Failed to send prompt to OpenCode server: {}", e),
+                }
+            } else {
+                println!("SessionManager: Could not find OpenCode server {}", session.opencode_server_id);
             }
         }
 
+        println!("SessionManager: Task {} distributed successfully", task_id);
         Ok(task_id)
     }
 

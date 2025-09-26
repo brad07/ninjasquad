@@ -4,10 +4,11 @@ import {
   ServerIcon,
   RectangleGroupIcon,
   QueueListIcon,
+  FolderIcon,
 } from '@heroicons/react/24/outline';
 import clsx from 'clsx';
 
-type View = 'dashboard' | 'servers' | 'sessions' | 'tasks';
+type View = 'dashboard' | 'servers' | 'sessions' | 'tasks' | 'projects';
 
 interface SidebarProps {
   currentView: View;
@@ -17,6 +18,7 @@ interface SidebarProps {
 const Sidebar: React.FC<SidebarProps> = ({ currentView, onViewChange }) => {
   const menuItems = [
     { id: 'dashboard' as View, label: 'Dashboard', icon: HomeIcon },
+    { id: 'projects' as View, label: 'Projects', icon: FolderIcon },
     { id: 'servers' as View, label: 'Servers', icon: ServerIcon },
     { id: 'sessions' as View, label: 'Sessions', icon: RectangleGroupIcon },
     { id: 'tasks' as View, label: 'Tasks', icon: QueueListIcon },

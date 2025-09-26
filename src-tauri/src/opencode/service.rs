@@ -3,18 +3,20 @@ use super::api_client::OpenCodeApiClient;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio::process::Command;
+use tokio::process::{Command, Child};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
 pub struct OpenCodeService {
     servers: Arc<RwLock<HashMap<String, OpenCodeServer>>>,
+    processes: Arc<RwLock<HashMap<String, Child>>>,
 }
 
 impl OpenCodeService {
     pub fn new() -> Self {
         Self {
             servers: Arc::new(RwLock::new(HashMap::new())),
+            processes: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -25,7 +27,7 @@ impl OpenCodeService {
         }
     }
 
-    pub async fn spawn_server(&self, port: u16) -> Result<OpenCodeServer, String> {
+    pub async fn spawn_server(&self, port: u16, working_dir: Option<String>) -> Result<OpenCodeServer, String> {
         // Check if port is available
         if !Self::is_port_available(port).await {
             return Err(format!("Port {} is already in use", port));
@@ -34,13 +36,22 @@ impl OpenCodeService {
         // Generate unique server ID
         let server_id = format!("server-{}", Uuid::new_v4());
 
+        // Use provided directory or fall back to home directory
+        let working_dir = if let Some(dir) = working_dir {
+            std::path::PathBuf::from(dir)
+        } else {
+            dirs::home_dir()
+                .ok_or_else(|| "Could not determine home directory".to_string())?
+        };
+
         // Spawn OpenCode server process
-        let mut child = Command::new("opencode")
+        let child = Command::new("opencode")
             .arg("serve")
             .arg("-p")
             .arg(port.to_string())
             .arg("-h")
-            .arg("127.0.0.1")
+            .arg("localhost")
+            .current_dir(&working_dir)
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("Failed to spawn OpenCode server: {}. Make sure 'opencode' is installed and in PATH", e))?;
@@ -50,14 +61,15 @@ impl OpenCodeService {
         // Create server record
         let server = OpenCodeServer {
             id: server_id.clone(),
-            host: "127.0.0.1".to_string(),
+            host: "localhost".to_string(),
             port,
             status: ServerStatus::Starting,
             process_id,
         };
 
-        // Store server
+        // Store server and process
         self.servers.write().await.insert(server_id.clone(), server.clone());
+        self.processes.write().await.insert(server_id.clone(), child);
 
         // Wait a bit for server to start
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
@@ -109,19 +121,129 @@ impl OpenCodeService {
         Err(format!("Server failed to start on port {}: {}", port, last_error))
     }
 
-    pub async fn stop_server(&self, server_id: &str) -> Result<(), String> {
-        let mut servers = self.servers.write().await;
+    pub async fn spawn_sdk_server(&self, port: u16, model: Option<String>, working_dir: Option<String>) -> Result<OpenCodeServer, String> {
+        // Check if port is available
+        if !Self::is_port_available(port).await {
+            return Err(format!("Port {} is already in use", port));
+        }
 
-        if let Some(server) = servers.get_mut(server_id) {
-            // Kill the process if it exists
-            if let Some(pid) = server.process_id {
-                // Try to kill the process
+        // Generate unique server ID
+        let server_id = format!("sdk-server-{}", Uuid::new_v4());
+
+        // Get the path to the SDK script
+        let script_path = std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join("scripts")
+            .join("sdk-server.js");
+
+        println!("SDK server script path: {:?}", script_path);
+
+        // Check if script exists
+        if !script_path.exists() {
+            return Err(format!("SDK server script not found at: {:?}", script_path));
+        }
+
+        // Use provided directory or fall back to home directory
+        let working_dir = if let Some(dir) = working_dir {
+            std::path::PathBuf::from(dir)
+        } else {
+            dirs::home_dir()
+                .ok_or_else(|| "Could not determine home directory".to_string())?
+        };
+
+        // Spawn Node.js process to run the SDK server
+        let model_arg = model.unwrap_or_else(|| "claude-sonnet-4-0".to_string());
+        println!("Starting SDK server with: node {:?} {} {} in directory {:?}", script_path, port, model_arg, working_dir);
+
+        let mut child = Command::new("node")
+            .arg(&script_path)
+            .arg(port.to_string())
+            .arg(&model_arg)
+            .current_dir(&working_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("Failed to spawn SDK server: {}. Make sure Node.js is installed", e))?;
+
+        let process_id = child.id();
+        println!("SDK server process started with PID: {:?}", process_id);
+
+        // Try to read initial output to see if server starts correctly
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        if let Some(stdout) = child.stdout.take() {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+
+            // Read a few initial lines to see startup messages
+            tokio::spawn(async move {
+                while let Ok(Some(line)) = lines.next_line().await {
+                    println!("SDK server stdout: {}", line);
+                }
+            });
+        }
+
+        // Store process handle
+        self.processes.write().await.insert(server_id.clone(), child);
+
+        // Create server info
+        let server = OpenCodeServer {
+            id: server_id.clone(),
+            host: "localhost".to_string(),
+            port,
+            status: ServerStatus::Starting,
+            process_id,
+        };
+
+        // Store server info
+        self.servers.write().await.insert(server_id.clone(), server.clone());
+
+        // Wait for server to be ready (with timeout)
+        let start_time = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(10);
+        let mut last_error = String::new();
+
+        while start_time.elapsed() < timeout {
+            let client = OpenCodeApiClient::new("localhost", port);
+            match client.health().await {
+                Ok(true) => {
+                    // Server is ready
+                    let mut servers = self.servers.write().await;
+                    if let Some(s) = servers.get_mut(&server_id) {
+                        s.status = ServerStatus::Running;
+                    }
+                    return Ok(servers.get(&server_id).unwrap().clone());
+                }
+                Ok(false) => last_error = "Health check returned false".to_string(),
+                Err(e) => last_error = e,
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        // Server failed to start
+        let mut servers = self.servers.write().await;
+        if let Some(s) = servers.get_mut(&server_id) {
+            s.status = ServerStatus::Error(format!("Failed to start: {}", last_error));
+            // Try to kill the process
+            if let Some(pid) = s.process_id {
                 let _ = Command::new("kill")
                     .arg(pid.to_string())
                     .output()
                     .await;
             }
+        }
+        Err(format!("SDK server failed to start on port {}: {}", port, last_error))
+    }
 
+    pub async fn stop_server(&self, server_id: &str) -> Result<(), String> {
+        // Remove and kill the process
+        if let Some(mut child) = self.processes.write().await.remove(server_id) {
+            let _ = child.kill().await;
+        }
+
+        let mut servers = self.servers.write().await;
+
+        if let Some(server) = servers.get_mut(server_id) {
             server.status = ServerStatus::Stopped;
             server.process_id = None;
             Ok(())
@@ -170,6 +292,106 @@ impl OpenCodeService {
 
     pub async fn get_server(&self, server_id: &str) -> Option<OpenCodeServer> {
         self.servers.read().await.get(server_id).cloned()
+    }
+
+    pub async fn scan_for_servers(&self, start_port: u16, end_port: u16) -> Result<Vec<OpenCodeServer>, String> {
+        println!("Scanning for OpenCode servers on ports {}-{}", start_port, end_port);
+        let mut discovered_servers = Vec::new();
+
+        for port in start_port..=end_port {
+            // Check if port is open by trying to connect
+            let client = OpenCodeApiClient::new("localhost", port);
+
+            // Try to check health with a very short timeout
+            match tokio::time::timeout(
+                tokio::time::Duration::from_millis(100),
+                client.health()
+            ).await {
+                Ok(Ok(true)) => {
+                    println!("Found OpenCode server on port {}", port);
+
+                    // Create a server entry for discovered server
+                    let server_id = format!("discovered-{}-{}", port, Uuid::new_v4());
+                    let server = OpenCodeServer {
+                        id: server_id.clone(),
+                        host: "localhost".to_string(),
+                        port,
+                        status: ServerStatus::Running,
+                        process_id: None, // We don't know the PID of external servers
+                    };
+
+                    // Check if we already track this server
+                    let servers = self.servers.read().await;
+                    let already_tracked = servers.values().any(|s| s.port == port);
+                    drop(servers);
+
+                    if !already_tracked {
+                        // Add to our tracking
+                        self.servers.write().await.insert(server_id, server.clone());
+                        discovered_servers.push(server);
+                    }
+                }
+                _ => {
+                    // Port doesn't have an OpenCode server or timed out
+                }
+            }
+        }
+
+        println!("Scan complete. Found {} new servers", discovered_servers.len());
+        Ok(discovered_servers)
+    }
+
+    pub async fn kill_all_servers(&self) -> Result<usize, String> {
+        use std::process::Command;
+
+        println!("Killing all servers: starting cleanup");
+
+        // First, try to gracefully kill all tracked processes
+        let mut processes = self.processes.write().await;
+        let process_count = processes.len();
+        println!("Found {} tracked processes to kill", process_count);
+
+        for (id, mut child) in processes.drain() {
+            println!("Killing tracked process: {}", id);
+            let _ = child.kill().await;
+        }
+
+        // Kill all OpenCode serve processes using pkill
+        println!("Running pkill for 'opencode serve'");
+        let result1 = Command::new("pkill")
+            .args(&["-f", "opencode serve"])
+            .output();
+        match result1 {
+            Ok(output) => println!("pkill opencode serve: exit code {:?}", output.status.code()),
+            Err(e) => println!("pkill opencode serve failed: {}", e),
+        }
+
+        // Kill all SDK server processes (Node.js processes running sdk-server.js)
+        println!("Running pkill for 'sdk-server.js'");
+        let result2 = Command::new("pkill")
+            .args(&["-f", "sdk-server.js"])
+            .output();
+        match result2 {
+            Ok(output) => println!("pkill sdk-server.js: exit code {:?}", output.status.code()),
+            Err(e) => println!("pkill sdk-server.js failed: {}", e),
+        }
+
+        // Also kill any orphaned opencode processes
+        println!("Running pkill for 'opencode'");
+        let result3 = Command::new("pkill")
+            .args(&["-f", "opencode"])
+            .output();
+        match result3 {
+            Ok(output) => println!("pkill opencode: exit code {:?}", output.status.code()),
+            Err(e) => println!("pkill opencode failed: {}", e),
+        }
+
+        // Clear the servers map
+        let servers_count = self.servers.read().await.len();
+        self.servers.write().await.clear();
+
+        println!("Kill all servers complete. Cleared {} servers from tracking", servers_count);
+        Ok(servers_count)
     }
 }
 
