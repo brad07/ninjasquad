@@ -20,7 +20,13 @@
       "Bash(cargo:*)",
       "Bash(node:*)",
       "WebSearch",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Read(//Users/bradbond/.local/share/opencode/log/**)",
+      "Bash(npm run build:*)",
+      "Bash(osascript:*)",
+      "Bash(wezterm cli spawn:*)",
+      "Bash(wezterm cli:*)",
+      "WebFetch(domain:docs.rs)"
     ],
     "deny": [],
     "ask": []

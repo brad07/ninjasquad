@@ -7,6 +7,7 @@ pub struct OpenCodeServer {
     pub port: u16,
     pub status: ServerStatus,
     pub process_id: Option<u32>,
+    pub working_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

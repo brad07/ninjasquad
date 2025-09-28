@@ -10,6 +10,8 @@ use uuid::Uuid;
 pub struct OpenCodeService {
     servers: Arc<RwLock<HashMap<String, OpenCodeServer>>>,
     processes: Arc<RwLock<HashMap<String, Child>>>,
+    distributed_mode: Arc<RwLock<bool>>,
+    queue_client: Option<Arc<dyn crate::queue::client::QueueClient>>,
 }
 
 impl OpenCodeService {
@@ -17,7 +19,23 @@ impl OpenCodeService {
         Self {
             servers: Arc::new(RwLock::new(HashMap::new())),
             processes: Arc::new(RwLock::new(HashMap::new())),
+            distributed_mode: Arc::new(RwLock::new(false)),
+            queue_client: None,
         }
+    }
+
+    pub fn with_queue_client(mut self, client: Arc<dyn crate::queue::client::QueueClient>) -> Self {
+        self.queue_client = Some(client);
+        self
+    }
+
+    pub async fn enable_distributed_mode(&self, enable: bool) {
+        let mut mode = self.distributed_mode.write().await;
+        *mode = enable;
+    }
+
+    pub async fn is_distributed_mode(&self) -> bool {
+        *self.distributed_mode.read().await
     }
 
     async fn is_port_available(port: u16) -> bool {
@@ -27,10 +45,49 @@ impl OpenCodeService {
         }
     }
 
+    async fn cleanup_port(port: u16) -> Result<(), String> {
+        // Kill any process using the port
+        println!("Cleaning up port {}", port);
+
+        // Use lsof to find process using the port
+        let output = Command::new("lsof")
+            .args(&["-ti", &format!(":{}", port)])
+            .output()
+            .await
+            .map_err(|e| format!("Failed to run lsof: {}", e))?;
+
+        if output.status.success() && !output.stdout.is_empty() {
+            let pids = String::from_utf8_lossy(&output.stdout);
+            for pid in pids.lines() {
+                if !pid.trim().is_empty() {
+                    println!("Killing process {} using port {}", pid.trim(), port);
+                    let _ = Command::new("kill")
+                        .arg("-9")
+                        .arg(pid.trim())
+                        .output()
+                        .await;
+                }
+            }
+            // Wait a bit for processes to die
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+
+        Ok(())
+    }
+
     pub async fn spawn_server(&self, port: u16, working_dir: Option<String>) -> Result<OpenCodeServer, String> {
         // Check if port is available
         if !Self::is_port_available(port).await {
-            return Err(format!("Port {} is already in use", port));
+            // Try to clean up the port first
+            println!("Port {} is in use, attempting cleanup", port);
+            if let Err(e) = Self::cleanup_port(port).await {
+                println!("Warning: Failed to cleanup port: {}", e);
+            }
+
+            // Check again after cleanup
+            if !Self::is_port_available(port).await {
+                return Err(format!("Port {} is already in use and could not be cleaned up", port));
+            }
         }
 
         // Generate unique server ID
@@ -65,6 +122,7 @@ impl OpenCodeService {
             port,
             status: ServerStatus::Starting,
             process_id,
+            working_dir: Some(working_dir.to_string_lossy().to_string()),
         };
 
         // Store server and process
@@ -121,10 +179,143 @@ impl OpenCodeService {
         Err(format!("Server failed to start on port {}: {}", port, last_error))
     }
 
+    pub async fn spawn_tui_server(&self, port: u16, model: Option<String>, working_dir: Option<String>) -> Result<OpenCodeServer, String> {
+        // Check if port is available
+        if !Self::is_port_available(port).await {
+            // Try to clean up the port first
+            println!("Port {} is in use, attempting cleanup", port);
+            if let Err(e) = Self::cleanup_port(port).await {
+                println!("Warning: Failed to cleanup port: {}", e);
+            }
+
+            // Check again after cleanup
+            if !Self::is_port_available(port).await {
+                return Err(format!("Port {} is already in use and could not be cleaned up", port));
+            }
+        }
+
+        // Generate unique server ID
+        let server_id = format!("tui-server-{}", Uuid::new_v4());
+
+        // Get the path to the TUI script
+        let script_path = std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join("scripts")
+            .join("opencode-tui.js");
+
+        println!("TUI server script path: {:?}", script_path);
+
+        // Check if script exists
+        if !script_path.exists() {
+            return Err(format!("TUI server script not found at: {:?}", script_path));
+        }
+
+        // Use provided directory or fall back to home directory
+        let working_dir = if let Some(dir) = working_dir {
+            std::path::PathBuf::from(dir)
+        } else {
+            dirs::home_dir()
+                .ok_or_else(|| "Could not determine home directory".to_string())?
+        };
+
+        // Spawn Node.js process to run the TUI with server
+        let model_arg = model.unwrap_or_else(|| "claude-sonnet-4-0".to_string());
+        println!("Starting OpenCode TUI with server: node {:?} {} {} in directory {:?}", script_path, port, model_arg, working_dir);
+
+        let mut child = Command::new("node")
+            .arg(&script_path)
+            .arg(port.to_string())
+            .arg(&model_arg)
+            .current_dir(&working_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("Failed to spawn TUI server: {}. Make sure Node.js is installed", e))?;
+
+        let process_id = child.id();
+        println!("TUI server process started with PID: {:?}", process_id);
+
+        // Try to read initial output to see if server starts correctly
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        if let Some(stdout) = child.stdout.take() {
+            let reader = BufReader::new(stdout);
+            let mut lines = reader.lines();
+
+            // Read a few initial lines to see startup messages
+            tokio::spawn(async move {
+                while let Ok(Some(line)) = lines.next_line().await {
+                    println!("TUI server stdout: {}", line);
+                }
+            });
+        }
+
+        // Store process handle
+        self.processes.write().await.insert(server_id.clone(), child);
+
+        // Create server info
+        let server = OpenCodeServer {
+            id: server_id.clone(),
+            host: "localhost".to_string(),
+            port,
+            status: ServerStatus::Starting,
+            process_id,
+            working_dir: Some(working_dir.to_string_lossy().to_string()),
+        };
+
+        // Store server info
+        self.servers.write().await.insert(server_id.clone(), server.clone());
+
+        // Wait for server to be ready (with timeout)
+        let start_time = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(10);
+        let mut last_error = String::new();
+
+        while start_time.elapsed() < timeout {
+            let client = OpenCodeApiClient::new("localhost", port);
+            match client.health().await {
+                Ok(true) => {
+                    // Server is ready
+                    let mut servers = self.servers.write().await;
+                    if let Some(s) = servers.get_mut(&server_id) {
+                        s.status = ServerStatus::Running;
+                    }
+                    return Ok(servers.get(&server_id).unwrap().clone());
+                }
+                Ok(false) => last_error = "Health check returned false".to_string(),
+                Err(e) => last_error = e,
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+
+        // Server failed to start
+        let mut servers = self.servers.write().await;
+        if let Some(s) = servers.get_mut(&server_id) {
+            s.status = ServerStatus::Error(format!("Failed to start: {}", last_error));
+            // Try to kill the process
+            if let Some(pid) = s.process_id {
+                let _ = Command::new("kill")
+                    .arg(pid.to_string())
+                    .output()
+                    .await;
+            }
+        }
+        Err(format!("TUI server failed to start on port {}: {}", port, last_error))
+    }
+
     pub async fn spawn_sdk_server(&self, port: u16, model: Option<String>, working_dir: Option<String>) -> Result<OpenCodeServer, String> {
         // Check if port is available
         if !Self::is_port_available(port).await {
-            return Err(format!("Port {} is already in use", port));
+            // Try to clean up the port first
+            println!("Port {} is in use, attempting cleanup", port);
+            if let Err(e) = Self::cleanup_port(port).await {
+                println!("Warning: Failed to cleanup port: {}", e);
+            }
+
+            // Check again after cleanup
+            if !Self::is_port_available(port).await {
+                return Err(format!("Port {} is already in use and could not be cleaned up", port));
+            }
         }
 
         // Generate unique server ID
@@ -193,6 +384,7 @@ impl OpenCodeService {
             port,
             status: ServerStatus::Starting,
             process_id,
+            working_dir: Some(working_dir.to_string_lossy().to_string()),
         };
 
         // Store server info
@@ -318,6 +510,7 @@ impl OpenCodeService {
                         port,
                         status: ServerStatus::Running,
                         process_id: None, // We don't know the PID of external servers
+                        working_dir: None, // Unknown for discovered servers
                     };
 
                     // Check if we already track this server

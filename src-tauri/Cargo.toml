@@ -36,6 +36,8 @@ async-trait = "0.1"
 portable-pty = "0.8"
 dirs = "5"
 rusqlite = { version = "0.32", features = ["bundled", "serde_json", "chrono"] }
+hostname = "0.4"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }
 
 [dev-dependencies]
 wiremock = "0.6"

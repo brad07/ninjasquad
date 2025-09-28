@@ -63,8 +63,9 @@ class SenseiService {
     const saved = localStorage.getItem('sensei-configs');
     if (saved) {
       try {
-        const configs = JSON.parse(saved);
+        // const configs = JSON.parse(saved);
         // Restore configurations if needed
+        JSON.parse(saved); // Parse to validate but don't use yet
       } catch (error) {
         console.error('Failed to load Sensei configurations:', error);
       }
@@ -143,7 +144,7 @@ class SenseiService {
   private async analyzeOutput(serverId: string, sessionId: string) {
     const key = `${serverId}-${sessionId}`;
     const session = this.sessions.get(key);
-    if (!session || !session.config.apiKey) return;
+    if (!session) return;
 
     // Get unanalyzed output
     const newOutput = session.outputBuffer.slice(session.lastAnalyzedIndex);
@@ -155,14 +156,14 @@ class SenseiService {
       // Prepare context
       const context = newOutput.join('\n');
 
-      // Use the API to analyze
+      // Use the API to analyze (it will handle missing API key)
       const response = await senseiAPI.analyzeOutput({
         output: context,
         systemPrompt: session.config.systemPrompt,
         model: session.config.model,
         temperature: session.config.temperature || 0.7,
         maxTokens: session.config.maxTokens || 500,
-        apiKey: session.config.apiKey,
+        apiKey: session.config.apiKey || '',
       });
 
       // Create recommendation from response
@@ -188,6 +189,19 @@ class SenseiService {
 
     } catch (error) {
       console.error('Failed to analyze output:', error);
+
+      // Create an error recommendation to show in the UI
+      const errorRecommendation: SenseiRecommendation = {
+        id: `rec-${Date.now()}`,
+        timestamp: new Date(),
+        input: '',
+        recommendation: `Analysis error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        confidence: 0,
+        executed: false
+      };
+
+      session.recommendations.push(errorRecommendation);
+      this.emitRecommendation(serverId, sessionId, errorRecommendation);
     }
   }
 

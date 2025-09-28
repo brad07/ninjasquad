@@ -28,3 +28,27 @@ pub struct CommandResult {
     pub output: String,
     pub error: Option<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WezTermWindow {
+    pub window_id: String,
+    pub pane_id: String,
+    pub project_id: Option<String>,
+    pub working_dir: String,
+    pub position: Option<(i32, i32)>,
+    pub size: Option<(u32, u32)>,
+    pub pid: Option<u32>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowPosition {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowSize {
+    pub width: u32,
+    pub height: u32,
+}

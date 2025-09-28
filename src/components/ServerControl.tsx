@@ -99,7 +99,8 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
   const loadProjects = async () => {
     try {
       const projectList = await projectsService.listProjects();
-      setProjects(projectList);
+      // Sort projects alphabetically by name
+      setProjects(projectList.sort((a, b) => a.name.localeCompare(b.name)));
     } catch (error) {
       console.error('Failed to load projects:', error);
     }
@@ -144,8 +145,10 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
 
     if (project) {
       workingDir = project.path;
-      // Update project last accessed time
-      await projectsService.updateProjectLastAccessed(project.id);
+      // Update project last accessed time (don't wait for it)
+      projectsService.updateProjectLastAccessed(project.id).catch(error => {
+        console.error('Failed to update project last accessed time:', error);
+      });
     } else {
       // If no project selected, ask user to select a directory
       const selectedDir = await open({
@@ -166,45 +169,32 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
     setIsSpawning(true);
     try {
       if (serverMode === 'sdk') {
-        // SDK Mode: Spawn server using Node.js SDK script with selected model
-        const newServer = await invoke<OpenCodeServer>('spawn_opencode_sdk_server', {
-          port,
-          model: selectedModel,
-          workingDir: workingDir
-        });
+        // Simply register the server info without spawning anything
+        // The terminal will run opencode --port <portno>
+        const serverId = `opencode-${port}`;
+        const newServer: OpenCodeServer = {
+          id: serverId,
+          host: 'localhost',
+          port: port,
+          status: 'Starting' as any,
+          working_dir: workingDir
+        };
+
         onServersUpdate([...servers, newServer]);
-        // Don't auto-select - let user click the tab to create session
-        // setActiveServerId(newServer.id);
 
-        // First, connect to it with SDK client
-        try {
-          // Wait a bit for server to be fully ready
-          await new Promise(resolve => setTimeout(resolve, 2000));
+        setNotification({
+          message: `Server registered on port ${port}`,
+          type: 'success'
+        });
 
-          await opencodeSDKService.connectToServerWithSDK(port, selectedModel);
+        // Set this as active server
+        setActiveServerId(newServer.id);
 
-          // Reload servers to ensure list is up to date
-          await loadServers();
+        // Mark session as ready so terminal can be opened
+        setSessionReady(prev => ({ ...prev, [serverId]: true }));
+        setSessionIds(prev => ({ ...prev, [serverId]: `session-${Date.now()}` }));
+        setIsNewSession(prev => ({ ...prev, [serverId]: true }));
 
-          setNotification({
-            message: `SDK server spawned and connected on port ${port} with model ${selectedModel}`,
-            type: 'success'
-          });
-
-          // Now create session after SDK connection is established
-          // Don't create session here - let the tab click handle it
-          // const sessionCreated = await handleCreateSession(newServer.id);
-          // console.log('Session creation result:', sessionCreated);
-
-          // Load available models after successful connection
-          await loadAvailableModels();
-        } catch (sdkError) {
-          console.error('SDK connection failed:', sdkError);
-          setNotification({
-            message: `SDK server spawned but client connection failed on port ${port}`,
-            type: 'error'
-          });
-        }
         setPort(port + 1);
       } else {
         // Process Mode: Use existing Tauri command
@@ -261,31 +251,22 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
         }
 
         try {
-          // First, check for existing sessions on this server
-          console.log('Checking for existing sessions on server:', sdkServer.id);
-          const existingSessions = await opencodeSDKService.listSessionsForServer(sdkServer.id);
-          console.log('Found existing sessions:', existingSessions);
+          // Always create a new session for existing servers on app reload
+          // This avoids issues with stale sessions from previous runs
+          console.log('Creating new SDK session for server:', sdkServer.id);
 
+          // First check if we already have a session ID stored for this server in our state
+          const existingSessionId = sessionIds[serverId];
           let sessionToUse = null;
 
-          if (existingSessions && existingSessions.length > 0) {
-            // If there are existing sessions, connect to the most recent one
-            console.log(`Found ${existingSessions.length} existing session(s), connecting to the first one`);
-            const existingSession = existingSessions[0];
-            sessionToUse = await opencodeSDKService.connectToExistingSession(sdkServer.id, existingSession.id);
-
-            if (sessionToUse) {
-              console.log('Connected to existing session:', sessionToUse.session.id);
-              setNotification({
-                message: `Connected to existing session: ${sessionToUse.session.title || sessionToUse.session.id}`,
-                type: 'success'
-              });
-            }
+          if (existingSessionId) {
+            // We already have a session for this server in the current app run
+            console.log('Using existing session from current app run:', existingSessionId);
+            sessionToUse = opencodeSDKService.getSDKSession(existingSessionId);
           }
 
-          // If no existing session was found or connection failed, create a new one
           if (!sessionToUse) {
-            console.log('Creating new SDK session for server:', sdkServer.id);
+            // Create a fresh session
             sessionToUse = await opencodeSDKService.createSDKSession(sdkServer.id);
             console.log('SDK Session created:', sessionToUse.session);
             console.log('Session ID:', sessionToUse.session.id);
@@ -299,8 +280,8 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
           // Mark session as ready for this server and store session ID
           setSessionReady(prev => ({ ...prev, [serverId]: true }));
           setSessionIds(prev => ({ ...prev, [serverId]: sessionToUse.session.id }));
-          // Track whether this was a new or existing session
-          setIsNewSession(prev => ({ ...prev, [serverId]: !existingSessions || existingSessions.length === 0 }));
+          // Track that this is a new session (always true when creating fresh sessions)
+          setIsNewSession(prev => ({ ...prev, [serverId]: !existingSessionId }));
           return true;
         } catch (sessionError: any) {
           // Session might already exist, which is fine
@@ -542,9 +523,9 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
 
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full overflow-hidden">
       {/* Main content area */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 flex flex-col min-h-0">
         {/* Notification */}
         {notification && (
           <div className={`fixed top-4 right-4 px-4 py-3 rounded-lg shadow-lg z-50 transition-all ${
@@ -601,7 +582,7 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
         )}
 
         {/* Control Panel */}
-        <div className="card">
+        <div className="p-4 bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
         <h2 className="text-xl font-semibold mb-4">Server Control</h2>
         <div className="flex items-end gap-4">
           <div className="flex-1">
@@ -677,9 +658,9 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
 
         {/* Server Tabs and Terminal Area */}
         {servers.length > 0 ? (
-          <div className="flex-1 flex flex-col overflow-hidden">
+          <div className="flex-1 flex flex-col min-h-0">
             {/* Server Tabs */}
-            <div className="flex bg-gray-800 border-b border-gray-700 overflow-x-auto">
+            <div className="flex bg-gray-800 border-b border-gray-700 overflow-x-auto flex-shrink-0">
               {servers.map((server) => {
                 const isActive = activeServerId === server.id;
                 const statusColor = server.status === 'Running' ? 'text-green-400' :
@@ -776,8 +757,8 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
             </div>
 
             {/* Terminal and Sensei Content */}
-            <div className="flex-1 bg-gray-900 flex">
-              <div className={`${showSenseiPanel ? 'flex-1' : 'w-full'} bg-gray-900`}>
+            <div className="flex-1 bg-gray-900 flex min-h-0">
+              <div className="flex-1 flex flex-col min-h-0">
               {activeServerId && sessionReady[activeServerId] ? (
                 <Terminal
                   key={`${activeServerId}-${sessionIds[activeServerId]}`}
@@ -834,17 +815,37 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
                 </div>
               )}
               </div>
-              {showSenseiPanel && activeServerId && sessionIds[activeServerId] && (
+              {showSenseiPanel && (
                 <div className="w-96">
-                  <SenseiPanel
-                    serverId={activeServerId}
-                    sessionId={sessionIds[activeServerId]}
-                    onExecuteCommand={(command) => {
-                      // Command will be executed through event system
-                      console.log('Executing Sensei command:', command);
-                    }}
-                    onOpenSettings={() => setShowSenseiSettings(true)}
-                  />
+                  {activeServerId && sessionIds[activeServerId] ? (
+                    <SenseiPanel
+                      serverId={activeServerId}
+                      sessionId={sessionIds[activeServerId]}
+                      onExecuteCommand={(command) => {
+                        // Command will be executed through event system
+                        console.log('Executing Sensei command:', command);
+                      }}
+                      onOpenSettings={() => setShowSenseiSettings(true)}
+                    />
+                  ) : (
+                    <div className="flex flex-col h-full bg-gray-800 border-l border-gray-700">
+                      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+                        <div className="flex items-center gap-2">
+                          <Brain className="h-5 w-5 text-gray-500" />
+                          <span className="font-medium text-gray-200">Sensei AI Assistant</span>
+                        </div>
+                      </div>
+                      <div className="flex-1 flex items-center justify-center p-4">
+                        <div className="text-center">
+                          <Brain className="h-12 w-12 text-gray-600 mb-3" />
+                          <p className="text-gray-400 mb-2">{!activeServerId ? 'No server selected' : 'No session active'}</p>
+                          <p className="text-sm text-gray-500">
+                            {!activeServerId ? 'Select a server to use Sensei' : 'Create or connect to a session to use Sensei'}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

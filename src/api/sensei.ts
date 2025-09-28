@@ -33,18 +33,25 @@ export class SenseiAPI {
   }
 
   async analyzeOutput(request: SenseiAnalysisRequest): Promise<SenseiAnalysisResponse> {
+    // Check if API key is provided
+    if (!request.apiKey || request.apiKey === '') {
+      console.warn('Sensei: No API key provided');
+      return {
+        recommendation: 'Please configure your OpenAI API key in Sensei settings to enable AI analysis.',
+        confidence: 0,
+      };
+    }
+
     try {
       // Configure OpenAI with the provided API key
-      const model = openai(request.model, {
-        apiKey: request.apiKey,
-      });
+      const model = openai(request.model);
 
       const result = await generateText({
         model,
         system: request.systemPrompt,
         prompt: `Analyze this recent terminal output and provide a recommendation:\n\n${request.output}`,
         temperature: request.temperature,
-        maxTokens: request.maxTokens,
+        maxRetries: 3,
       });
 
       // Try to parse as JSON, fallback to plain text
@@ -62,9 +69,26 @@ export class SenseiAPI {
           confidence: 0.5,
         };
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to analyze with AI:', error);
-      throw error;
+
+      // Return user-friendly error message instead of throwing
+      if (error?.message?.includes('API key')) {
+        return {
+          recommendation: 'Invalid API key. Please check your OpenAI API key in settings.',
+          confidence: 0,
+        };
+      } else if (error?.message?.includes('rate limit')) {
+        return {
+          recommendation: 'Rate limit reached. Please wait a moment before trying again.',
+          confidence: 0,
+        };
+      } else {
+        return {
+          recommendation: `AI analysis failed: ${error?.message || 'Unknown error'}`,
+          confidence: 0,
+        };
+      }
     }
   }
 
@@ -72,17 +96,23 @@ export class SenseiAPI {
     request: SenseiAnalysisRequest,
     onChunk: (chunk: string) => void
   ): Promise<SenseiAnalysisResponse> {
+    // Check if API key is provided
+    if (!request.apiKey || request.apiKey === '') {
+      return {
+        recommendation: 'Please configure your OpenAI API key in Sensei settings to enable AI analysis.',
+        confidence: 0,
+      };
+    }
+
     try {
-      const model = openai(request.model, {
-        apiKey: request.apiKey,
-      });
+      const model = openai(request.model);
 
       const { textStream, text } = await streamText({
         model,
         system: request.systemPrompt,
         prompt: `Analyze this recent terminal output and provide a recommendation:\n\n${request.output}`,
         temperature: request.temperature,
-        maxTokens: request.maxTokens,
+        maxSteps: 5,
       });
 
       // Stream the chunks
@@ -107,21 +137,24 @@ export class SenseiAPI {
           confidence: 0.5,
         };
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to stream analysis:', error);
-      throw error;
+      return {
+        recommendation: `Streaming failed: ${error?.message || 'Unknown error'}`,
+        confidence: 0,
+      };
     }
   }
 
   // Validate API key by making a minimal request
   async validateApiKey(apiKey: string, modelName: string = 'gpt-3.5-turbo'): Promise<boolean> {
     try {
-      const model = openai(modelName, { apiKey });
+      const model = openai(modelName);
 
       await generateText({
         model,
         prompt: 'Test',
-        maxTokens: 1,
+        maxRetries: 3,
       });
 
       return true;

@@ -3,6 +3,7 @@ import { Terminal as XTerm } from 'xterm';
 import { FitAddon } from 'xterm-addon-fit';
 import { WebLinksAddon } from 'xterm-addon-web-links';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, UnlistenFn } from '@tauri-apps/api/event';
 import { senseiService } from '../services/SenseiService';
 import 'xterm/css/xterm.css';
 
@@ -12,6 +13,16 @@ interface TerminalProps {
   isNewSession?: boolean;
   onClose?: () => void;
   enableSensei?: boolean;
+  mirrorId?: string;  // If set, terminal will display mirrored WezTerm content
+}
+
+interface MirrorUpdate {
+  mirror_id: string;
+  content: string;
+  cursor_x: number;
+  cursor_y: number;
+  viewport_start: number;
+  viewport_end: number;
 }
 
 interface TerminalSession {
@@ -20,13 +31,14 @@ interface TerminalSession {
   cols: number;
 }
 
-export const Terminal: React.FC<TerminalProps> = ({ serverId, sessionId, isNewSession = false, onClose, enableSensei = false }) => {
+export const Terminal: React.FC<TerminalProps> = ({ serverId, sessionId, isNewSession = false, onClose, enableSensei = false, mirrorId }) => {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<XTerm | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [terminalSessionId, setTerminalSessionId] = useState<string | null>(null);
   const terminalSessionIdRef = useRef<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
+  const mirrorUnlistenRef = useRef<UnlistenFn | null>(null);
 
   // Update ref when terminalSessionId changes
   useEffect(() => {
@@ -53,6 +65,19 @@ export const Terminal: React.FC<TerminalProps> = ({ serverId, sessionId, isNewSe
 
   useEffect(() => {
     if (!terminalRef.current) return;
+
+    // Ensure the terminal container is in the DOM
+    if (!terminalRef.current.offsetParent) {
+      console.warn('Terminal container not visible, deferring initialization');
+      // Try again after a short delay
+      const retryTimeout = setTimeout(() => {
+        if (terminalRef.current && terminalRef.current.offsetParent) {
+          // Re-trigger the effect by updating a state
+          setIsConnected(prev => !prev);
+        }
+      }, 100);
+      return () => clearTimeout(retryTimeout);
+    }
 
     // Initialize Sensei session if enabled
     if (enableSensei && serverId && sessionId) {
@@ -88,7 +113,6 @@ export const Terminal: React.FC<TerminalProps> = ({ serverId, sessionId, isNewSe
       allowTransparency: true,
       scrollback: 10000,
       // Disable mouse tracking to prevent garbage characters on scroll
-      mouseSupport: false,
       rightClickSelectsWord: false,
     });
 
@@ -101,30 +125,71 @@ export const Terminal: React.FC<TerminalProps> = ({ serverId, sessionId, isNewSe
 
     // Open terminal in the container
     xterm.open(terminalRef.current);
-    fitAddon.fit();
 
     xtermRef.current = xterm;
     fitAddonRef.current = fitAddon;
 
-    // Initialize terminal session
-    initializeTerminal(xterm);
+    // Use ResizeObserver for better terminal sizing
+    const resizeObserver = new ResizeObserver(() => {
+      try {
+        if (fitAddonRef.current && xtermRef.current) {
+          fitAddonRef.current.fit();
+        }
+      } catch (error) {
+        console.error('Error fitting terminal:', error);
+      }
+    });
+
+    if (terminalRef.current) {
+      resizeObserver.observe(terminalRef.current);
+    }
+
+    // Initial fit after a short delay
+    setTimeout(() => {
+      try {
+        if (fitAddonRef.current && xtermRef.current) {
+          fitAddonRef.current.fit();
+        }
+      } catch (error) {
+        console.error('Error fitting terminal:', error);
+      }
+    }, 100);
+
+    // Initialize terminal session or mirror mode
+    if (mirrorId) {
+      initializeMirrorMode(xterm);
+    } else {
+      initializeTerminal(xterm);
+    }
 
     // Handle terminal input
     // Note: We don't write the data to xterm here because the PTY will echo it back
     const dataHandler = xterm.onData((data) => {
-      if (terminalSessionIdRef.current) {
+      if (mirrorId) {
+        // In mirror mode, forward input to WezTerm
+        sendToMirror(data);
+      } else if (terminalSessionIdRef.current) {
         // Only send to PTY, don't display locally
-        writeToTerminal(data);
+        writeToTerminal(data, false); // false = user input, will be echoed
       }
     });
 
     // Handle resize
     const handleResize = () => {
-      if (fitAddonRef.current && xtermRef.current) {
-        fitAddonRef.current.fit();
-        if (terminalSessionId) {
-          resizeTerminal(xtermRef.current.cols, xtermRef.current.rows);
+      try {
+        if (fitAddonRef.current && xtermRef.current) {
+          // Check if terminal is still mounted and visible
+          if (!xtermRef.current.element?.offsetParent) {
+            console.warn('Terminal element not visible, skipping resize');
+            return;
+          }
+          fitAddonRef.current.fit();
+          if (terminalSessionId) {
+            resizeTerminal(xtermRef.current.cols, xtermRef.current.rows);
+          }
         }
+      } catch (error) {
+        console.error('Error handling terminal resize:', error);
       }
     };
 
@@ -133,15 +198,30 @@ export const Terminal: React.FC<TerminalProps> = ({ serverId, sessionId, isNewSe
     // Cleanup
     return () => {
       window.removeEventListener('resize', handleResize);
-      dataHandler.dispose(); // Dispose the data handler to prevent duplicates
-      if (terminalSessionIdRef.current) {
+      resizeObserver.disconnect();
+      try {
+        dataHandler.dispose(); // Dispose the data handler to prevent duplicates
+      } catch (error) {
+        console.error('Error disposing data handler:', error);
+      }
+      if (mirrorUnlistenRef.current) {
+        mirrorUnlistenRef.current();
+      }
+      if (mirrorId) {
+        stopMirror();
+      } else if (terminalSessionIdRef.current) {
         killTerminal();
       }
-      xterm.dispose();
+      try {
+        xterm.dispose();
+      } catch (error) {
+        console.error('Error disposing terminal:', error);
+      }
     };
-  }, []);
+  }, [mirrorId]);
 
-  const [commandSent, setCommandSent] = useState(false);
+  const [, setCommandSent] = useState(false);
+  const commandSentRef = useRef(false);
 
   const initializeTerminal = async (xterm: XTerm) => {
     try {
@@ -162,60 +242,53 @@ export const Terminal: React.FC<TerminalProps> = ({ serverId, sessionId, isNewSe
       // Store the terminal session ID for later use
       const terminalId = session.id;
 
-      // If we have a serverId, we need to get the session ID to connect
-      if (serverId && sessionId && !commandSent) {
-        // Get server details
-        const server = await invoke<{ host: string; port: number }>('get_server_details', { serverId });
+      // If we have a serverId, run opencode --port command
+      if (serverId && !commandSentRef.current) {
+        // Mark command as sent immediately to prevent any duplicates
+        commandSentRef.current = true;
+        setCommandSent(true);
 
-        if (isNewSession) {
-          // For new sessions, auto-execute the command
-          xterm.writeln(`\r\n\x1b[32m# Connecting to new OpenCode Session...\x1b[0m`);
-          xterm.writeln(`\x1b[36m# Session: ${sessionId}\x1b[0m`);
-          xterm.writeln(`\x1b[36m# Server: localhost:${server.port}\x1b[0m\r\n`);
+        // Extract port from serverId (format: opencode-4097)
+        const portMatch = serverId.match(/opencode-(\d+)/);
+        const port = portMatch ? portMatch[1] : '4097';
 
-          // Mark command as sent to prevent duplicates
-          setCommandSent(true);
+        xterm.writeln(`\r\n\x1b[32m# Starting OpenCode on port ${port}...\x1b[0m`);
+        xterm.writeln(`\x1b[36m# This will start both the TUI and server\x1b[0m\r\n`);
 
-          // Auto-execute the command with a delay, but type it character by character
-          setTimeout(async () => {
-            const connectCmd = `opencode -h localhost --port ${server.port} -s ${sessionId}`;
-            console.log('Auto-typing command for new session:', connectCmd);
+        // Run opencode --port command
+        setTimeout(async () => {
+          const connectCmd = `opencode --port ${port}`;
+          console.log(`Running OpenCode command: ${connectCmd}`);
 
-            try {
-              // Type the command character by character to avoid duplication
-              for (const char of connectCmd) {
-                await invoke('write_to_terminal', {
-                  terminalId: terminalId,
-                  data: char
-                });
-                await new Promise(resolve => setTimeout(resolve, 10)); // Small delay between chars
-              }
-              // Send enter key
-              await invoke('write_to_terminal', {
-                terminalId: terminalId,
-                data: '\r'
-              });
-              console.log('Command typed successfully');
-            } catch (error) {
-              console.error('Failed to type command to terminal:', error);
-            }
-          }, 2500); // Wait 2.5 seconds for shell to fully initialize
-        } else {
-          // For existing sessions, just show the command
-          xterm.writeln(`\r\n\x1b[32m# OpenCode Session Ready\x1b[0m`);
-          xterm.writeln(`\x1b[36m# Session: ${sessionId}\x1b[0m`);
-          xterm.writeln(`\x1b[36m# Server: localhost:${server.port}\x1b[0m`);
-          xterm.writeln(`\x1b[33m# To connect, run:\x1b[0m`);
-          xterm.writeln(`\x1b[37mopencode -h localhost --port ${server.port} -s ${sessionId}\x1b[0m\r\n`);
+          try {
+            // Clear any existing input
+            await invoke('write_to_terminal', {
+              terminalId: terminalId,
+              data: '\x03'  // Ctrl+C
+            });
+            await new Promise(resolve => setTimeout(resolve, 200));
 
-          // Mark command as sent to prevent duplicates
-          setCommandSent(true);
-        }
+            // Send the opencode command
+            await invoke('write_to_terminal', {
+              terminalId: terminalId,
+              data: connectCmd + '\r'
+            });
+
+            console.log('OpenCode command sent successfully');
+
+          } catch (error) {
+            console.error('Failed to run OpenCode:', error);
+          }
+        }, 1000); // Shorter delay since we're just running a command
       } else if (serverId) {
         // If we only have serverId but no sessionId, just show the server info
-        const server = await invoke<{ host: string; port: number }>('get_server_details', { serverId });
+        const server = await invoke<{ host: string; port: number; working_dir?: string }>('get_server_details', { serverId });
         xterm.writeln(`\r\n\x1b[33m# Waiting for session to be created...\x1b[0m`);
-        xterm.writeln(`\x1b[36m# Server available at localhost:${server.port}\x1b[0m\r\n`);
+        xterm.writeln(`\x1b[36m# Server available at localhost:${server.port}\x1b[0m`);
+        if (server.working_dir) {
+          xterm.writeln(`\x1b[36m# Working directory: ${server.working_dir}\x1b[0m`);
+        }
+        xterm.writeln('\r\n');
       }
     } catch (error) {
       console.error('Failed to initialize terminal:', error);
@@ -229,11 +302,51 @@ export const Terminal: React.FC<TerminalProps> = ({ serverId, sessionId, isNewSe
       const { listen } = await import('@tauri-apps/api/event');
       const unlisten = await listen<string>(`terminal-output-${terminalId}`, (event) => {
         if (xtermRef.current) {
-          xtermRef.current.write(event.payload);
+          const output = event.payload;
+          xtermRef.current.write(output);
 
           // Send output to Sensei if enabled
           if (enableSensei && serverId && sessionId) {
-            senseiService.appendOutput(serverId, sessionId, event.payload);
+            senseiService.appendOutput(serverId, sessionId, output);
+          }
+
+          // Check for error messages with log file paths
+          // Match various formats of log file references
+          const logPatterns = [
+            /check log file at ([^\s]+\.log)/i,
+            /log file: ([^\s]+\.log)/i,
+            /see log: ([^\s]+\.log)/i,
+            /details in ([^\s]+\.log)/i,
+            /logged to ([^\s]+\.log)/i
+          ];
+
+          let logFilePath = null;
+          for (const pattern of logPatterns) {
+            const match = output.match(pattern);
+            if (match && match[1]) {
+              logFilePath = match[1];
+              break;
+            }
+          }
+
+          if (logFilePath) {
+            console.log('Error detected with log file:', logFilePath);
+
+            // Auto-tail the log file after a short delay
+            setTimeout(async () => {
+              if (terminalSessionIdRef.current && xtermRef.current) {
+                // Display a helpful message
+                xtermRef.current.writeln('\r\n\x1b[33m# Auto-tailing error log file (last 30 lines)...\x1b[0m');
+                xtermRef.current.writeln('\x1b[33m# To see more, run: tail -n 100 "' + logFilePath + '"\x1b[0m\r\n');
+
+                // Send the tail command
+                const tailCmd = `tail -n 30 "${logFilePath}"`;
+                await invoke('write_to_terminal', {
+                  terminalId: terminalSessionIdRef.current,
+                  data: tailCmd + '\r'
+                });
+              }
+            }, 500); // Small delay to let the error message finish displaying
           }
         }
       });
@@ -245,11 +358,11 @@ export const Terminal: React.FC<TerminalProps> = ({ serverId, sessionId, isNewSe
     }
   };
 
-  const writeToTerminal = async (data: string) => {
+  const writeToTerminal = async (data: string, isProgrammatic: boolean = true) => {
     if (!terminalSessionIdRef.current) return;
 
     // Debug log to see what's being sent
-    console.log(`[Terminal ${terminalSessionIdRef.current}] Writing:`, JSON.stringify(data), 'Length:', data.length);
+    console.log(`[Terminal ${terminalSessionIdRef.current}] Writing (programmatic=${isProgrammatic}):`, JSON.stringify(data), 'Length:', data.length);
 
     try {
       await invoke('write_to_terminal', {
@@ -294,13 +407,75 @@ export const Terminal: React.FC<TerminalProps> = ({ serverId, sessionId, isNewSe
     }
   };
 
+  const initializeMirrorMode = async (xterm: XTerm) => {
+    if (!mirrorId) return;
+
+    try {
+      xterm.writeln('\x1b[33m# WezTerm Mirror Mode\x1b[0m');
+      xterm.writeln('\x1b[36m# Displaying output from WezTerm terminal...\x1b[0m\r\n');
+
+      // Listen for mirror updates
+      mirrorUnlistenRef.current = await listen<MirrorUpdate>('wezterm-mirror-update', (event) => {
+        const update = event.payload;
+        if (update.mirror_id === mirrorId && xtermRef.current) {
+          // Clear and write the new content
+          xtermRef.current.clear();
+          xtermRef.current.write(update.content);
+
+          // Position cursor if provided
+          if (update.cursor_x !== undefined && update.cursor_y !== undefined) {
+            xtermRef.current.write(`\x1b[${update.cursor_y + 1};${update.cursor_x + 1}H`);
+          }
+        }
+      });
+
+      setIsConnected(true);
+
+      // Get initial content
+      try {
+        const content = await invoke<string>('get_mirror_content', { mirrorId });
+        if (content) {
+          xterm.write(content);
+        }
+      } catch (error) {
+        console.error('Failed to get initial mirror content:', error);
+      }
+    } catch (error) {
+      console.error('Failed to initialize mirror mode:', error);
+      xterm.writeln('\r\n\x1b[31mError: Failed to initialize mirror mode\x1b[0m');
+    }
+  };
+
+  const sendToMirror = async (data: string) => {
+    if (!mirrorId) return;
+
+    try {
+      await invoke('send_input_to_mirror', {
+        mirrorId,
+        text: data
+      });
+    } catch (error) {
+      console.error('Failed to send input to mirror:', error);
+    }
+  };
+
+  const stopMirror = async () => {
+    if (!mirrorId) return;
+
+    try {
+      await invoke('stop_wezterm_mirror', { mirrorId });
+    } catch (error) {
+      console.error('Failed to stop mirror:', error);
+    }
+  };
+
   return (
-    <div className="flex flex-col h-full bg-gray-900 rounded-lg overflow-hidden">
+    <div className="flex flex-col h-full w-full bg-gray-900 overflow-hidden">
       <div className="flex items-center justify-between px-4 py-2 bg-gray-800 border-b border-gray-700">
         <div className="flex items-center space-x-2">
           <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />
           <span className="text-sm text-gray-300">
-            {serverId ? `Server: ${serverId}` : 'Terminal'}
+            {mirrorId ? `WezTerm Mirror: ${mirrorId.substring(0, 8)}` : serverId ? `Server: ${serverId}` : 'Terminal'}
           </span>
         </div>
         {onClose && (
@@ -316,8 +491,8 @@ export const Terminal: React.FC<TerminalProps> = ({ serverId, sessionId, isNewSe
       </div>
       <div
         ref={terminalRef}
-        className="flex-1 p-2"
-        style={{ backgroundColor: '#1e1e2e' }}
+        className="flex-1 min-h-0 overflow-hidden"
+        style={{ backgroundColor: '#1e1e2e', padding: '8px' }}
       />
     </div>
   );

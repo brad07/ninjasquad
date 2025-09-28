@@ -40,6 +40,8 @@ export class OpenCodeSDKService {
   private servers: Map<string, SDKServer> = new Map();
   private sessions: Map<string, ExtendedSession> = new Map();
   private sessionResponses: Map<string, any> = new Map();
+  private currentApiUrl: string = 'http://localhost:4096';
+  private currentClient: OpencodeClient | null = null;
 
   async connectToServerWithSDK(port: number, model?: string): Promise<SDKServer> {
     const serverId = `sdk-server-${Date.now()}-${Math.random().toString(36).substring(7)}`;
@@ -136,7 +138,7 @@ export class OpenCodeSDKService {
         body: {
           title: sessionTitle
         }
-      }) as Session;
+      }) as any;
 
       console.log('Session created:', session);
 
@@ -297,6 +299,237 @@ export class OpenCodeSDKService {
     return server?.config?.model;
   }
 
+  // Set the API URL for the SDK client
+  setApiUrl(url: string): void {
+    this.currentApiUrl = url;
+    if (!url) {
+      // Clear the client if no URL provided
+      this.currentClient = null;
+      return;
+    }
+    // Create a new client with the updated URL and responseStyle
+    this.currentClient = createOpencodeClient({
+      baseUrl: url,
+      responseStyle: 'data' // Returns data directly instead of wrapped response
+    } as any);
+    console.log('SDK client initialized with URL:', url);
+  }
+
+  // Create a session using the current client
+  async createSession(): Promise<Session> {
+    if (!this.currentClient) {
+      console.error('No client initialized. Current API URL:', this.currentApiUrl);
+      throw new Error('No client initialized. Call setApiUrl first.');
+    }
+
+    try {
+      console.log('Creating session with client at:', this.currentApiUrl);
+
+      const session = await this.currentClient.session.create({
+        body: {
+          title: `SDK Test Session ${Date.now()}`
+        }
+      }) as any;
+
+      console.log('Session created successfully:', session);
+
+      // Store the session in our internal map
+      const extendedSession: ExtendedSession = {
+        serverId: 'current',
+        session,
+        messages: [],
+        status: 'Idle',
+      };
+      this.sessions.set(session.id, extendedSession);
+
+      return session;
+    } catch (error: any) {
+      console.error('Failed to create session:', error);
+      console.error('Error details:', {
+        message: error?.message,
+        response: error?.response,
+        status: error?.response?.status,
+        data: error?.response?.data
+      });
+      throw new Error(`Failed to create session: ${error?.message || error}`);
+    }
+  }
+
+  // Send a message to a session
+  async sendMessage(sessionId: string, message: string): Promise<any> {
+    if (!this.currentClient) {
+      throw new Error('No client initialized. Call setApiUrl first.');
+    }
+
+    const extendedSession = this.sessions.get(sessionId);
+    if (!extendedSession) {
+      // For simplified client, we might not have it tracked
+      console.log('Session not in local map, proceeding anyway');
+    }
+
+    try {
+      // Update session status if we have it
+      if (extendedSession) {
+        extendedSession.status = 'Working';
+        extendedSession.lastPrompt = message;
+        this.sessions.set(sessionId, extendedSession);
+      }
+
+      console.log('Sending prompt to session:', sessionId, 'Message:', message);
+
+      // The server is configured with 'claude-sonnet-4-0' which doesn't exist
+      // Let's try to omit the model entirely and let it fail more gracefully
+      let promptBody: any = {
+        parts: [
+          {
+            type: 'text',
+            text: message
+          }
+        ]
+      };
+
+      console.log('Prompt body:', JSON.stringify(promptBody, null, 2));
+      console.log('API URL:', this.currentApiUrl);
+
+      // Try direct fetch first to debug the API
+      try {
+        let fetchResponse = await fetch(`${this.currentApiUrl}/session/${sessionId}/message`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(promptBody)
+        });
+
+        console.log('Direct fetch response status:', fetchResponse.status);
+
+        if (!fetchResponse.ok) {
+          const errorText = await fetchResponse.text();
+          console.error('API Error Response (no model):', errorText);
+
+          // If it's a model error, try with different model formats
+          if (errorText.includes('ProviderModelNotFoundError') || errorText.includes('model')) {
+            console.log('Trying with claude-3-5-sonnet-latest model...');
+
+            // Try with model as string
+            promptBody.model = 'claude-3-5-sonnet-latest';
+            fetchResponse = await fetch(`${this.currentApiUrl}/session/${sessionId}/message`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(promptBody)
+            });
+
+            if (!fetchResponse.ok) {
+              const errorText2 = await fetchResponse.text();
+              console.error('API Error Response (with model string):', errorText2);
+
+              // Try with model object format
+              promptBody.model = {
+                providerID: 'anthropic',
+                modelID: 'claude-3-5-sonnet-latest'
+              };
+
+              fetchResponse = await fetch(`${this.currentApiUrl}/session/${sessionId}/message`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(promptBody)
+              });
+
+              if (!fetchResponse.ok) {
+                const errorText3 = await fetchResponse.text();
+                console.error('API Error Response (with model object):', errorText3);
+              }
+            }
+          }
+
+          if (!fetchResponse.ok) {
+            // If all attempts fail, try the SDK method
+            const response = await (this.currentClient.session as any).prompt({
+              path: { id: sessionId },
+              body: promptBody
+            });
+            return response;
+          }
+        }
+
+        const response = await fetchResponse.json();
+        console.log('Direct fetch successful response:', response);
+        return response;
+      } catch (fetchError) {
+        console.error('Direct fetch failed:', fetchError);
+
+        // Fall back to SDK method
+        const response = await (this.currentClient.session as any).prompt({
+          path: { id: sessionId },
+          body: promptBody
+        });
+        console.log('SDK fallback response:', response);
+        return response;
+      }
+
+      // The response might be a stream or need polling
+      // Let's wait a bit and try to get the actual response
+      if (!response || (typeof response === 'object' && Object.keys(response).length === 0)) {
+        // Wait for the response to be processed
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        // Try to get messages or the session state
+        try {
+          // Some SDKs return an empty object and you need to poll or stream
+          // Let's try getting the session to see if there's a response
+          const sessionData = await this.currentClient.session.get({
+            path: { id: sessionId }
+          }) as any;
+
+          console.log('Session data after prompt:', sessionData);
+
+          // Check if there's a last_message or similar field
+          if (sessionData?.last_message) {
+            extendedSession.status = 'Completed';
+            extendedSession.lastResponse = sessionData.last_message;
+            this.sessions.set(sessionId, extendedSession);
+            return sessionData.last_message;
+          }
+        } catch (pollError) {
+          console.error('Error polling for response:', pollError);
+        }
+      }
+
+      // Update session with response if we have it
+      if (extendedSession) {
+        extendedSession.status = 'Completed';
+        extendedSession.lastResponse = response;
+        this.sessions.set(sessionId, extendedSession);
+      }
+
+      return response;
+    } catch (error: any) {
+      if (extendedSession) {
+        extendedSession.status = 'Failed';
+        this.sessions.set(sessionId, extendedSession);
+      }
+      console.error('Error sending message:', error);
+      console.error('Error details:', {
+        message: error?.message,
+        response: error?.response,
+        status: error?.response?.status,
+        statusText: error?.response?.statusText,
+        data: error?.response?.data,
+        body: error?.response?.body
+      });
+
+      // Try to provide more specific error information
+      if (error?.response?.status === 400) {
+        throw new Error(`Bad Request: The server rejected the message format. ${error?.response?.data || error?.message || error}`);
+      }
+      throw new Error(`Failed to send message: ${error?.message || error}`);
+    }
+  }
+
   // Fetch all available models from providers
   async fetchAvailableModels(serverId: string): Promise<AvailableModel[]> {
     const sdkServer = this.servers.get(serverId);
@@ -305,7 +538,7 @@ export class OpenCodeSDKService {
     }
 
     try {
-      const providersData = await sdkServer.client.config.providers();
+      const providersData = await sdkServer.client.config.providers() as any;
       const modelMap = new Map<string, AvailableModel>();
 
       // Always include claude-sonnet-4-0
@@ -316,14 +549,14 @@ export class OpenCodeSDKService {
       });
 
       // Get the default models from providers
-      if (providersData.default) {
+      if (providersData?.default) {
         for (const [providerId, modelId] of Object.entries(providersData.default)) {
-          const provider = providersData.providers.find(p => p.name === providerId);
+          const provider = providersData.providers?.find((p: any) => p.name === providerId);
           if (provider && modelId) {
             // Use just the modelId as the key to avoid duplicates
-            modelMap.set(modelId, {
+            modelMap.set(modelId as string, {
               provider: providerId,
-              modelId: modelId,
+              modelId: modelId as string,
               displayName: `${providerId}/${modelId}`
             });
           }
@@ -412,7 +645,7 @@ export class OpenCodeSDKService {
     }
 
     try {
-      const projects = await sdkServer.client.project.list();
+      const projects = await sdkServer.client.project.list() as any;
       return projects || [];
     } catch (error) {
       console.error(`Failed to list projects for server ${serverId}:`, error);
@@ -428,7 +661,7 @@ export class OpenCodeSDKService {
     }
 
     try {
-      const sessions = await sdkServer.client.session.list();
+      const sessions = await sdkServer.client.session.list() as any;
       return sessions || [];
     } catch (error) {
       console.error(`Failed to list sessions for server ${serverId}:`, error);
@@ -447,7 +680,7 @@ export class OpenCodeSDKService {
       // Get the session details
       const session = await sdkServer.client.session.get({
         path: { id: sessionId }
-      }) as Session;
+      }) as any;
 
       if (session) {
         const extendedSession: ExtendedSession = {

@@ -25,15 +25,16 @@ await invoke('create_terminal', { serverId: serverId });
 
 ## Project Architecture
 
-### Current Mode: SDK Only
-The application now defaults to SDK mode for spawning OpenCode servers. Process mode code is preserved but not actively used.
+### Current Mode: Direct OpenCode Execution
+The application simply runs `opencode --port <portno>` in the terminal. This starts OpenCode with both TUI and server on the specified port.
 
 ### Backend (Rust/Tauri)
 - `/src-tauri/src/lib.rs` - Main Tauri application with command handlers
 - `/src-tauri/src/opencode/service.rs` - OpenCode server management
 - `/src-tauri/src/session/manager.rs` - Session management
 - `/src-tauri/src/pty/` - PTY management for embedded terminals
-- `/src-tauri/scripts/sdk-server.js` - Node.js script for SDK server spawning
+- `/src-tauri/scripts/opencode-tui.js` - Node.js script for spawning OpenCode TUI with server
+- `/src-tauri/scripts/sdk-server.js` - Node.js script for SDK server spawning (legacy)
 
 ### Frontend (React/TypeScript)
 - `/src/components/ServerControl.tsx` - Server management with tabbed interface
@@ -44,25 +45,26 @@ The application now defaults to SDK mode for spawning OpenCode servers. Process 
 ## Key Features & Implementation Details
 
 ### 1. OpenCode Server Management
-- **SDK Mode**: Spawns servers via Node.js script using OpenCode SDK
-- **Default Model**: `claude-sonnet-4-0`
+- **Direct Execution**: Runs `opencode --port <portno>` in terminal
+- **Default Model**: `claude-sonnet-4-0` (passed to opencode command)
 - **Port Range**: Starting from 4097
-- **Tabbed Interface**: Each server appears as a tab with integrated terminal
+- **Tabbed Interface**: Each server appears as a tab with integrated terminal showing OpenCode TUI
 
-### 2. Session Creation Flow
-**Critical**: Must follow this exact sequence:
-1. Spawn server (waits 3 seconds for initialization)
-2. Create SDK connection to server
-3. Create session on server
-4. Terminal connects using: `opencode -h 127.0.0.1 --port PORT -s SESSION_ID`
+### 2. OpenCode Execution Flow
+**Simple approach**:
+1. User selects port and clicks spawn
+2. Terminal executes `opencode --port <portno>`
+3. OpenCode starts with TUI and server on that port
+4. User interacts directly with OpenCode TUI
 
-**Important**: The `-s SESSION_ID` flag is required for connection
+**Important**: OpenCode CLI does NOT support connecting to existing servers. Each terminal runs its own OpenCode instance.
 
 ### 3. Terminal Integration
 - Uses xterm.js for frontend display
 - PTY backend for actual shell interaction
-- Auto-connects to OpenCode when server selected
+- Executes `opencode --port <portno>` to start OpenCode
 - Commands sent with `\r` (carriage return) for execution
+- **Auto-tails error logs**: Automatically shows log file contents when errors occur
 
 ### Common Issues & Solutions
 
@@ -95,8 +97,8 @@ if (!commandSent) {
 
 #### 4. Model Configuration
 To change the default model, update in:
-- `/src-tauri/scripts/sdk-server.js` (line ~10)
-- `/src-tauri/src/opencode/service.rs` (line ~134)
+- `/src-tauri/scripts/opencode-tui.js` (line ~10)
+- `/src-tauri/src/opencode/service.rs` (line ~204 in spawn_tui_server)
 - `/src/services/OpenCodeSDKService.ts` (line ~60)
 - `/src/components/ServerControl.tsx` (default state)
 

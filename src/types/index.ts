@@ -4,6 +4,7 @@ export interface OpenCodeServer {
   port: number;
   status: ServerStatus;
   process_id?: number;
+  working_dir?: string;
 }
 
 export type ServerStatus = 'Starting' | 'Running' | 'Stopped' | { Error: string };
