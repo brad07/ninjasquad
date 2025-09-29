@@ -1,4 +1,4 @@
-import { openai } from '@ai-sdk/openai';
+import { createOpenAI } from '@ai-sdk/openai';
 import { generateText, streamText } from 'ai';
 
 // This module handles the AI SDK integration for Sensei
@@ -44,15 +44,31 @@ export class SenseiAPI {
 
     try {
       // Configure OpenAI with the provided API key
-      const model = openai(request.model);
+      const openai = createOpenAI({
+        apiKey: request.apiKey,
+      });
 
-      const result = await generateText({
-        model,
+      // Reasoning models (like GPT-5/o1 models) don't support temperature
+      const isReasoningModel = request.model.includes('gpt-5') ||
+                               request.model.includes('o1-preview') ||
+                               request.model.includes('o1-mini');
+
+      // Build generation params based on model capabilities
+      const generationParams: any = {
+        model: openai(request.model),
         system: request.systemPrompt,
         prompt: `Analyze this recent terminal output and provide a recommendation:\n\n${request.output}`,
-        temperature: request.temperature,
         maxRetries: 3,
-      });
+        maxTokens: request.maxTokens,
+        abortSignal: AbortSignal.timeout(120000), // 120 second timeout
+      };
+
+      // Only add temperature for non-reasoning models
+      if (!isReasoningModel) {
+        generationParams.temperature = request.temperature;
+      }
+
+      const result = await generateText(generationParams);
 
       // Try to parse as JSON, fallback to plain text
       try {
@@ -105,15 +121,30 @@ export class SenseiAPI {
     }
 
     try {
-      const model = openai(request.model);
+      const openai = createOpenAI({
+        apiKey: request.apiKey,
+      });
 
-      const { textStream, text } = await streamText({
-        model,
+      // Reasoning models (like GPT-5/o1 models) don't support temperature
+      const isReasoningModel = request.model.includes('gpt-5') ||
+                               request.model.includes('o1-preview') ||
+                               request.model.includes('o1-mini');
+
+      // Build streaming params based on model capabilities
+      const streamParams: any = {
+        model: openai(request.model),
         system: request.systemPrompt,
         prompt: `Analyze this recent terminal output and provide a recommendation:\n\n${request.output}`,
-        temperature: request.temperature,
+        maxTokens: request.maxTokens,
         maxSteps: 5,
-      });
+      };
+
+      // Only add temperature for non-reasoning models
+      if (!isReasoningModel) {
+        streamParams.temperature = request.temperature;
+      }
+
+      const { textStream, text } = await streamText(streamParams);
 
       // Stream the chunks
       for await (const chunk of textStream) {
@@ -149,12 +180,15 @@ export class SenseiAPI {
   // Validate API key by making a minimal request
   async validateApiKey(apiKey: string, modelName: string = 'gpt-3.5-turbo'): Promise<boolean> {
     try {
-      const model = openai(modelName);
+      const openai = createOpenAI({
+        apiKey: apiKey,
+      });
 
       await generateText({
-        model,
+        model: openai(modelName),
         prompt: 'Test',
         maxRetries: 3,
+        maxTokens: 10,
       });
 
       return true;

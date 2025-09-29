@@ -22,7 +22,7 @@ const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
   const [expandedSections, setExpandedSections] = useState({
     favorites: true,
     recent: true,
-    all: true
+    all: false
   });
 
   useEffect(() => {
@@ -93,18 +93,18 @@ const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
           });
         }}
         className={clsx(
-          'w-full px-3 py-2 rounded-md transition-colors text-left group',
+          'w-full px-3 py-2 transition-all text-left group font-medium',
           isSelected
-            ? 'bg-blue-600 text-white'
-            : 'hover:bg-gray-800 text-gray-300 hover:text-white'
+            ? 'bg-purple-400 text-black border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]'
+            : 'hover:bg-yellow-100 text-gray-700 hover:text-black hover:translate-x-1'
         )}
       >
         <div className="flex items-center space-x-2">
           <div
-            className="w-2 h-2 rounded-full flex-shrink-0"
-            style={{ backgroundColor: project.color || '#3b82f6' }}
+            className="w-3 h-3 rounded-full flex-shrink-0 border border-black"
+            style={{ backgroundColor: project.color || '#a855f7' }}
           />
-          <span className="text-sm truncate">{project.name}</span>
+          <span className="text-sm truncate font-medium">{project.name}</span>
         </div>
       </button>
     );
@@ -123,46 +123,46 @@ const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
   }) => (
     <button
       onClick={() => toggleSection(section)}
-      className="w-full flex items-center justify-between px-3 py-1.5 text-xs font-semibold text-gray-500 hover:text-gray-300 transition-colors"
+      className="w-full flex items-center justify-between px-3 py-2 text-xs font-bold text-black uppercase hover:bg-yellow-50 transition-all"
     >
       <div className="flex items-center space-x-1.5">
         {expandedSections[section] ? (
-          <ChevronDown className="h-3 w-3" />
+          <ChevronDown className="h-4 w-4" strokeWidth={2} />
         ) : (
-          <ChevronRight className="h-3 w-3" />
+          <ChevronRight className="h-4 w-4" strokeWidth={2} />
         )}
-        <Icon className="h-3 w-3" />
-        <span className="uppercase tracking-wider">{title}</span>
+        <Icon className="h-4 w-4" strokeWidth={2} />
+        <span className="tracking-wider">{title}</span>
       </div>
-      <span className="text-gray-600">{count}</span>
+      <span className="bg-black text-white px-1.5 py-0.5 text-xs font-bold rounded">{count}</span>
     </button>
   );
 
   if (loading) {
     return (
-      <aside className="w-64 bg-gray-900 border-r border-gray-800 flex flex-col">
-        <div className="p-4 border-b border-gray-800">
-          <h2 className="text-lg font-semibold text-white">Projects</h2>
+      <aside className="w-64 bg-white border-r-4 border-black flex flex-col">
+        <div className="p-4 border-b-4 border-black bg-gradient-to-r from-purple-100 to-pink-100">
+          <h2 className="text-xl font-bold text-black">Projects</h2>
         </div>
         <div className="flex-1 flex items-center justify-center">
-          <p className="text-gray-500 text-sm">Loading...</p>
+          <p className="text-gray-400 text-sm">Loading...</p>
         </div>
       </aside>
     );
   }
 
   return (
-    <aside className="w-64 bg-gray-900 border-r border-gray-800 flex flex-col">
+    <aside className="w-64 bg-white border-r-4 border-black flex flex-col flex-shrink-0">
       {/* Header */}
-      <div className="p-4 border-b border-gray-800">
+      <div className="p-4 border-b-4 border-black bg-gradient-to-r from-purple-100 to-pink-100">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-white">Projects</h2>
+          <h2 className="text-xl font-bold text-black">Projects</h2>
           <button
             onClick={onNewProject}
-            className="p-1.5 text-gray-400 hover:text-white hover:bg-gray-800 rounded-md transition-colors"
+            className="p-2 bg-yellow-400 text-black hover:bg-yellow-500 border-2 border-black shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] transition-all"
             title="New Project"
           >
-            <Plus size={18} />
+            <Plus size={18} strokeWidth={3} />
           </button>
         </div>
       </div>
@@ -222,23 +222,13 @@ const ProjectSidebar: React.FC<ProjectSidebarProps> = ({
                   <ProjectItem key={project.id} project={project} />
                 ))
               ) : (
-                <p className="text-center text-gray-500 text-sm py-4">
+                <p className="text-center text-gray-500 text-sm py-4 font-medium">
                   No projects yet
                 </p>
               )}
             </div>
           )}
         </div>
-      </div>
-
-      {/* Quick Actions */}
-      <div className="p-3 border-t border-gray-800">
-        <button
-          onClick={() => onProjectSelect(null)}
-          className="w-full px-3 py-2 text-sm text-gray-400 hover:text-white hover:bg-gray-800 rounded-md transition-colors text-left"
-        >
-          Show All Servers
-        </button>
       </div>
     </aside>
   );

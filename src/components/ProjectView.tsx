@@ -1,14 +1,21 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Plus, Server, Folder, Edit, Trash, Star, Terminal as TerminalIcon, Brain, Monitor } from 'lucide-react';
+import { listen } from '@tauri-apps/api/event';
+import { Plus, Server, Folder, Edit, Trash, Star, Terminal as TerminalIcon, Brain, Monitor, Zap } from 'lucide-react';
+import { Button } from '@/components/retroui/Button';
+import ClaudeIcon from './icons/ClaudeIcon';
 import type { Project } from '../types/project';
 import type { OpenCodeServer } from '../types';
 import { projectsService } from '../services/ProjectsService';
 import { opencodeSDKService } from '../services/OpenCodeSDKService';
 import { senseiService } from '../services/SenseiService';
+import { pluginService } from '../services/PluginService';
+import { claudeCodeSDKService } from '../services/ClaudeCodeSDKService';
 import Terminal from './Terminal';
 import SenseiPanel from './SenseiPanel';
 import SenseiSettings from './SenseiSettings';
+import PluginSelector from './PluginSelector';
+import ClaudeCodeUI from './plugins/ClaudeCodeUI';
 import type { ServerMode } from './ModeToggle';
 
 interface TmuxSession {
@@ -73,6 +80,18 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
     approved?: boolean;
   }>>([]);
   const [workingDisappearedTime, setWorkingDisappearedTime] = useState<number | null>(null);
+  const [activePlugin, setActivePlugin] = useState<any>(null);
+  const [showClaudeCode, setShowClaudeCode] = useState(false);
+  const [claudeSessionId, setClaudeSessionId] = useState<string | null>(() => {
+    // Restore session ID from localStorage if it exists
+    const savedSessionId = localStorage.getItem(`claude-session-${project.id}`);
+    if (savedSessionId) {
+      console.log('Restored Claude session from localStorage:', savedSessionId);
+    }
+    return savedSessionId;
+  });
+  const [activeSessionTab, setActiveSessionTab] = useState<string | null>(null);
+  const [pendingSenseiCount, setPendingSenseiCount] = useState<number>(0);
   const autoRefreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const workingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const latestTmuxOutputRef = useRef<string[]>([]);
@@ -81,6 +100,10 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
   const LLM_RATE_LIMIT_MS = 60000; // 1 minute between calls
 
   useEffect(() => {
+    // Check active plugin
+    const active = pluginService.getActivePlugin();
+    setActivePlugin(active);
+
     loadProjectServers();
     loadTmuxSessions();
 
@@ -101,14 +124,10 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
     if (savedTimeout) {
       setSenseiTimeout(parseInt(savedTimeout, 10));
     }
-
-    // Cleanup on unmount
-    return () => {
-      if (workingTimeoutRef.current) {
-        clearTimeout(workingTimeoutRef.current);
-      }
-    };
   }, [project.id]);
+
+  // Claude Code now directly adds recommendations via senseiService.addClaudeCodeRecommendation()
+  // No need for event listener anymore
 
 
 
@@ -454,6 +473,52 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
   };
 
   const spawnTmuxSession = async () => {
+    // Check if Claude Code is the active plugin
+    const active = pluginService.getActivePlugin();
+    if (active?.id === 'claude-code') {
+      // For Claude Code, open the chat interface instead of tmux
+      setShowClaudeCode(true);
+      // Initialize Claude Code session if needed
+      if (!claudeSessionId) {
+        try {
+          const sessionId = await claudeCodeSDKService.createSession(undefined, project.path);
+          setClaudeSessionId(sessionId);
+          // Persist session ID to localStorage
+          localStorage.setItem(`claude-session-${project.id}`, sessionId);
+          console.log('Saved Claude session to localStorage:', sessionId);
+
+          setActiveSessionTab(`claude-${sessionId}`); // Set active tab for Claude
+          setNotification({
+            message: `Claude Code session started in ${project.path}`,
+            type: 'success'
+          });
+        } catch (error) {
+          console.error('Failed to create Claude Code session:', error);
+          setNotification({
+            message: `Failed to start Claude Code: ${error}`,
+            type: 'error'
+          });
+        }
+      } else {
+        // Using existing session (either from state or localStorage)
+        setActiveSessionTab(`claude-${claudeSessionId}`); // Activate existing Claude session
+        // Ensure it's still registered in the service
+        const existingSession = claudeCodeSDKService.getSession(claudeSessionId);
+        if (!existingSession) {
+          console.log('Re-registering restored session:', claudeSessionId);
+          // Create a new session and get the new ID from backend
+          const newSessionId = await claudeCodeSDKService.createSession(undefined, project.path);
+          setClaudeSessionId(newSessionId);
+          // Update localStorage with new session ID
+          localStorage.setItem(`claude-session-${project.id}`, newSessionId);
+          console.log('Updated session ID from', claudeSessionId, 'to', newSessionId);
+          setActiveSessionTab(`claude-${newSessionId}`);
+        }
+      }
+      return;
+    }
+
+    // Original tmux logic for OpenCode
     setIsSpawningTmux(true);
     try {
       // Create a new tmux session for this project
@@ -463,6 +528,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
 
       setTmuxSessions(prev => [...prev, session]);
       setActiveTmuxSession(session);
+      setActiveSessionTab(`tmux-${session.id}`); // Set active tab for tmux
       setAutoRefresh(true); // Ensure auto-refresh is enabled
 
       // Capture initial content
@@ -1100,7 +1166,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="h-full flex flex-col overflow-hidden">
       {/* Notification */}
       {notification && (
         <div className={`fixed top-20 right-4 px-4 py-3 rounded-lg shadow-lg z-50 transition-all ${
@@ -1112,123 +1178,163 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
         </div>
       )}
 
-      {/* Project Header */}
-      <div className="bg-gray-800 border-b border-gray-700 p-6">
-        <div className="flex items-start justify-between">
-          <div className="flex items-start space-x-4">
-            <div
-              className="w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0"
-              style={{ backgroundColor: project.color || '#3b82f6' }}
-            >
-              <Folder className="w-6 h-6 text-white" />
-            </div>
-            <div>
-              <h2 className="text-2xl font-bold text-white">{project.name}</h2>
-              {project.description && (
-                <p className="text-gray-400 mt-1">{project.description}</p>
-              )}
-              <p className="text-sm text-gray-500 mt-2">{project.path}</p>
-              {project.lastAccessed && (
-                <p className="text-xs text-gray-600 mt-1">
-                  Last accessed: {new Date(project.lastAccessed).toLocaleString()}
-                </p>
-              )}
-            </div>
-          </div>
-          <div className="flex items-center space-x-2">
-            <button
-              onClick={handleToggleFavorite}
-              className={`p-2 rounded-lg transition-colors ${
-                project.isFavorite
-                  ? 'text-yellow-400 bg-yellow-400/20'
-                  : 'text-gray-400 hover:text-yellow-400 hover:bg-gray-700'
-              }`}
-              title={project.isFavorite ? 'Remove from favorites' : 'Add to favorites'}
-            >
-              <Star size={20} fill={project.isFavorite ? 'currentColor' : 'none'} />
-            </button>
-            <button
-              onClick={() => onEdit(project)}
-              className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded-lg transition-colors"
-              title="Edit project"
-            >
-              <Edit size={20} />
-            </button>
-            <button
-              onClick={() => {
-                if (confirm('Are you sure you want to delete this project?')) {
-                  onDelete(project);
-                  onBack();
-                }
-              }}
-              className="p-2 text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded-lg transition-colors"
-              title="Delete project"
-            >
-              <Trash size={20} />
-            </button>
-          </div>
-        </div>
-      </div>
-
-
-      {/* Tmux Controls */}
-      <div className="bg-gray-800 border-b border-gray-700 p-4">
+      {/* Agent Controls - Combined Plugin Selector and Session Button */}
+      <div className="bg-white border-b border-gray-200 p-4 flex-shrink-0">
         <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-4">
-            <button
+          <div className="flex items-center space-x-3">
+            <PluginSelector />
+            <Button
               onClick={spawnTmuxSession}
               disabled={isSpawningTmux}
-              className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors disabled:opacity-50 flex items-center space-x-2"
-              title="Create a new tmux session with OpenCode"
+              variant="default"
+              className="font-bold shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all border-2 border-black bg-yellow-400 hover:bg-yellow-500 text-black"
+              title={activePlugin?.id === 'claude-code' ? 'Start Claude Code chat session' : 'Start a new tmux session with OpenCode'}
             >
-              <Monitor size={18} />
-              <span>{isSpawningTmux ? 'Creating...' : 'Create Tmux Session'}</span>
-            </button>
-            {tmuxSessions.length > 0 && (
-              <div className="flex items-center space-x-2">
-                {tmuxSessions.map((session) => (
-                  <div
-                    key={session.id}
-                    className={`px-3 py-1 rounded-lg text-sm text-gray-300 flex items-center space-x-2 cursor-pointer transition-colors ${
-                      activeTmuxSession?.id === session.id ? 'bg-blue-600 text-white' : 'bg-gray-700 hover:bg-gray-600'
-                    }`}
-                    onClick={() => {
-                      setActiveTmuxSession(session);
-                      setAutoRefresh(true); // Enable auto-refresh when selecting session
-                      lastKnownLineCountRef.current = 0; // Reset line count for new session
-                      setTmuxOutput([]); // Clear display
-                      setFullTmuxOutput([]); // Clear full output
-                      captureTmuxContent(session.id);
-                    }}
-                  >
-                    <TerminalIcon size={14} />
-                    <span>{session.id.slice(0, 12)}...</span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        killTmuxSession(session.id);
-                      }}
-                      className="ml-1 text-gray-500 hover:text-red-400 transition-colors"
-                      title="Kill session"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
+              <Zap className="mr-2 h-4 w-4" />
+              {isSpawningTmux ? 'Starting...' : 'Start Agent Session'}
+            </Button>
           </div>
-          <div className="text-sm text-gray-400">
-            {tmuxSessions.length} tmux {tmuxSessions.length === 1 ? 'session' : 'sessions'} running
+          <div className="text-sm text-gray-600">
+            {tmuxSessions.length + (claudeSessionId ? 1 : 0)} agent {(tmuxSessions.length + (claudeSessionId ? 1 : 0)) === 1 ? 'session' : 'sessions'} running
           </div>
         </div>
       </div>
 
-      {/* Tmux Terminal Display with Sensei */}
-      {activeTmuxSession ? (
-        <div className="flex-1 flex bg-gray-900">
-          <div className="flex-1 flex flex-col bg-black">
-            <div className="flex items-center justify-between bg-gray-800 p-3 border-b border-gray-700">
+      {/* Agent Session Tabs */}
+      {(tmuxSessions.length > 0 || claudeSessionId) && (
+        <div className="bg-white border-b border-gray-200 px-4 pt-2 flex-shrink-0">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2 overflow-x-auto">
+            {/* Claude Code Sessions */}
+            {claudeSessionId && (
+              <button
+                className={`px-4 py-2 rounded-t-lg text-sm flex items-center space-x-2 transition-colors ${
+                  activeSessionTab === `claude-${claudeSessionId}`
+                    ? 'bg-purple-200 text-black border-2 border-black border-b-0 font-bold'
+                    : 'bg-white text-gray-700 border border-gray-300 hover:bg-purple-50 hover:text-black hover:border-black'
+                }`}
+                onClick={() => {
+                  setActiveSessionTab(`claude-${claudeSessionId}`);
+                  setShowClaudeCode(true);
+                  setActiveTmuxSession(null);
+                }}
+              >
+                <ClaudeIcon className="text-orange-600" size="16" />
+                <span>Claude Code</span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    // Clear session from localStorage when closing
+                    localStorage.removeItem(`claude-session-${project.id}`);
+                    console.log('Cleared Claude session from localStorage');
+                    setClaudeSessionId(null);
+                    setShowClaudeCode(false);
+                    if (activeSessionTab === `claude-${claudeSessionId}`) {
+                      setActiveSessionTab(null);
+                    }
+                  }}
+                  className="ml-2 text-gray-400 hover:text-red-500"
+                  title="Close session"
+                >
+                  ×
+                </button>
+              </button>
+            )}
+
+            {/* Tmux Sessions */}
+            {tmuxSessions.map((session) => (
+              <button
+                key={session.id}
+                className={`px-4 py-2 rounded-t-lg text-sm flex items-center space-x-2 transition-colors ${
+                  activeSessionTab === `tmux-${session.id}`
+                    ? 'bg-purple-200 text-black border-2 border-black border-b-0 font-bold'
+                    : 'bg-white text-gray-700 border border-gray-300 hover:bg-purple-50 hover:text-black hover:border-black'
+                }`}
+                onClick={() => {
+                  setActiveSessionTab(`tmux-${session.id}`);
+                  setActiveTmuxSession(session);
+                  setShowClaudeCode(false);
+                  setAutoRefresh(true);
+                  lastKnownLineCountRef.current = 0;
+                  setTmuxOutput([]);
+                  setFullTmuxOutput([]);
+                  captureTmuxContent(session.id);
+                }}
+              >
+                <img src="/icons/opencode.svg" alt="OpenCode" className="w-4 h-4" />
+                <span>{session.id.slice(0, 12)}...</span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    killTmuxSession(session.id);
+                    if (activeSessionTab === `tmux-${session.id}`) {
+                      setActiveSessionTab(null);
+                    }
+                  }}
+                  className="ml-2 text-gray-400 hover:text-red-500"
+                  title="Kill session"
+                >
+                  ×
+                </button>
+              </button>
+            ))}
+            </div>
+            {/* Sensei Toggle Button */}
+            <button
+              onClick={() => setShowSenseiPanel(!showSenseiPanel)}
+              className={`p-1.5 rounded transition-colors relative ${
+                showSenseiPanel
+                  ? 'text-blue-400 bg-blue-600/20'
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+              title="Toggle Sensei AI Assistant"
+            >
+              <Brain className="h-4 w-4" />
+              {pendingSenseiCount > 0 && (
+                <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center font-bold">
+                  {pendingSenseiCount}
+                </span>
+              )}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Claude Code UI or Tmux Terminal Display */}
+      {showClaudeCode ? (
+        <div className="flex-1 flex bg-gray-50 overflow-hidden">
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <ClaudeCodeUI
+              plugin={activePlugin}
+              session={claudeSessionId ? { id: claudeSessionId, agent_id: claudeSessionId } : undefined}
+              server={undefined}
+              onCommand={async (cmd) => {
+                console.log('Claude Code command:', cmd);
+              }}
+              config={{
+                ...pluginService.getPluginSettings('claude-code'),
+                workingDirectory: project.path
+              }}
+            />
+          </div>
+          {showSenseiPanel && (
+            <div className="w-96 flex-shrink-0 flex flex-col overflow-hidden">
+              <SenseiPanel
+                serverId="claude-code"
+                sessionId={claudeSessionId || ''}
+                onPendingCountChange={setPendingSenseiCount}
+                onExecuteCommand={(command) => {
+                  // Command will be executed through Claude Code
+                }}
+                onOpenSettings={() => setShowSenseiSettings(true)}
+              />
+            </div>
+          )}
+        </div>
+      ) : activeTmuxSession ? (
+        <div className="flex-1 flex bg-gray-50 overflow-hidden">
+          <div className="flex-1 flex flex-col bg-black overflow-hidden">
+            <div className="flex items-center justify-between bg-white p-3 border-b border-gray-200">
               <span className="text-green-400 text-sm font-mono">Tmux Session: {activeTmuxSession.id}</span>
               <div className="flex items-center space-x-2">
                 <button
@@ -1240,7 +1346,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                       senseiService.toggleSensei(activeServerId, sessionIds[activeServerId], true);
                     }
                   }}
-                  className={`p-1.5 rounded transition-colors ${
+                  className={`p-1.5 rounded transition-colors relative ${
                     showSenseiPanel
                       ? 'text-blue-400 bg-blue-600/20'
                       : 'text-gray-500 hover:text-gray-300'
@@ -1248,13 +1354,18 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                   title="Toggle Sensei AI Assistant"
                 >
                   <Brain className="h-4 w-4" />
+                  {pendingSenseiCount > 0 && (
+                    <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center font-bold">
+                      {pendingSenseiCount}
+                    </span>
+                  )}
                 </button>
                 <button
                   onClick={() => setAutoRefresh(!autoRefresh)}
                   className={`px-3 py-1 rounded text-xs transition-colors ${
                     autoRefresh
-                      ? 'bg-blue-600 text-white animate-pulse'
-                      : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+                      ? 'bg-blue-500 text-white animate-pulse'
+                      : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                   }`}
                 >
                   {autoRefresh ? 'Auto-refresh ON' : 'Auto-refresh OFF'}
@@ -1262,7 +1373,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                 <button
                   onClick={() => captureTmuxContent(activeTmuxSession.id)}
                   disabled={autoRefresh}
-                  className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-gray-300 rounded text-xs transition-colors disabled:opacity-50"
+                  className="px-3 py-1 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded text-xs transition-colors disabled:opacity-50"
                 >
                   Refresh
                 </button>
@@ -1295,9 +1406,9 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
             </div>
           </div>
           {showSenseiPanel && (
-            <div className="w-[600px] flex-shrink-0 h-full bg-gray-800 border-l border-gray-700">
+            <div className="w-[600px] flex-shrink-0 overflow-hidden bg-white border-l border-gray-200">
               <div className="flex flex-col h-full">
-                <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
                   <div className="flex items-center gap-2">
                     <Brain className={`h-5 w-5 ${isProcessingLLM ? 'text-yellow-400 animate-pulse' : 'text-blue-400'}`} />
                     <span className="font-medium text-gray-200">Sensei AI Assistant</span>
@@ -1348,7 +1459,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                           <select
                             value={senseiModel}
                             onChange={(e) => setSenseiModel(e.target.value)}
-                            className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-gray-100 text-sm focus:outline-none focus:border-blue-400"
+                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm focus:outline-none focus:border-blue-500"
                           >
                             <option value="gpt-4o-mini">GPT-4o Mini (Fast & Cheap)</option>
                             <option value="gpt-4o">GPT-4o (Most Capable)</option>
@@ -1368,7 +1479,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                           <select
                             value={senseiTimeout}
                             onChange={(e) => setSenseiTimeout(parseInt(e.target.value, 10))}
-                            className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-gray-100 text-sm focus:outline-none focus:border-blue-400"
+                            className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-gray-900 text-sm focus:outline-none focus:border-blue-500"
                           >
                             <option value="1000">1 second</option>
                             <option value="2000">2 seconds (Default)</option>
@@ -1390,7 +1501,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                             value={senseiSystemPrompt}
                             onChange={(e) => setSenseiSystemPrompt(e.target.value)}
                             placeholder={`Default prompt: You are an AI assistant helping with a development project called "${project.name}" at path "${project.path}".\nYou are monitoring terminal output and should provide helpful responses when needed.`}
-                            className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-white focus:outline-none focus:border-blue-500 resize-y font-mono"
+                            className="w-full px-3 py-2 bg-gray-100 border border-gray-300 rounded text-sm text-gray-900 focus:outline-none focus:border-blue-500 resize-y font-mono"
                             rows={10}
                           />
                           <p className="text-xs text-gray-400 mt-2">
@@ -1407,7 +1518,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                               localStorage.setItem(`sensei_timeout_${project.id}`, senseiTimeout.toString());
                               setShowSenseiSettings(false);
                             }}
-                            className="flex-1 px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-sm transition-colors"
+                            className="flex-1 px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm transition-colors"
                           >
                             Save Settings
                           </button>
@@ -1420,7 +1531,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                               localStorage.removeItem(`sensei_model_${project.id}`);
                               localStorage.removeItem(`sensei_timeout_${project.id}`);
                             }}
-                            className="px-3 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded text-sm transition-colors"
+                            className="px-3 py-2 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded text-sm transition-colors"
                           >
                             Reset
                           </button>
@@ -1430,7 +1541,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                   ) : (
                   <div className="flex flex-col h-full space-y-4">
                     {/* Automated Response Toggle */}
-                    <div className="bg-gray-700 rounded-lg p-3">
+                    <div className="bg-gray-100 rounded-lg p-3">
                       {!import.meta.env.VITE_OPENAI_API_KEY && (
                         <div className="mb-2 p-2 bg-yellow-900/50 border border-yellow-700 rounded">
                           <p className="text-xs text-yellow-400">
@@ -1465,7 +1576,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
 
                     {/* Pending LLM Request Approval */}
                     {pendingLLMRequest && (
-                      <div className="bg-gray-700 border border-yellow-500 rounded p-3 space-y-3">
+                      <div className="bg-yellow-50 border border-yellow-400 rounded p-3 space-y-3">
                         <div className="flex items-center justify-between">
                           <h4 className="text-sm font-medium text-yellow-400">AI Response Requested</h4>
                           <span className="text-xs text-gray-400">
@@ -1474,7 +1585,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                         </div>
                         <div className="space-y-2">
                           <p className="text-xs text-gray-300">Context to be sent:</p>
-                          <div className="bg-gray-800 rounded p-2 max-h-32 overflow-y-auto">
+                          <div className="bg-gray-50 rounded p-2 max-h-32 overflow-y-auto">
                             <pre className="text-xs text-gray-400 whitespace-pre-wrap font-mono">
                               {pendingLLMRequest.context}
                             </pre>
@@ -1486,7 +1597,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                               processOutputWithLLM(pendingLLMRequest.context);
                               setPendingLLMRequest(null);
                             }}
-                            className="flex-1 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded text-sm transition-colors"
+                            className="flex-1 px-3 py-1.5 bg-green-500 hover:bg-green-600 text-white rounded text-sm transition-colors"
                           >
                             Approve
                           </button>
@@ -1495,7 +1606,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                               setPendingLLMRequest(null);
                               setLastProcessedOutput(pendingLLMRequest.output); // Mark as processed to avoid re-triggering
                             }}
-                            className="flex-1 px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-sm transition-colors"
+                            className="flex-1 px-3 py-1.5 bg-red-500 hover:bg-red-600 text-white rounded text-sm transition-colors"
                           >
                             Reject
                           </button>
@@ -1509,7 +1620,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                         <h3 className="text-sm font-medium text-gray-300">AI Assistant</h3>
                         <textarea
                         placeholder="Ask Coding Agent for help with your code or commands..."
-                        className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-sm text-white focus:outline-none focus:border-blue-500 resize-none"
+                        className="w-full px-3 py-2 bg-white border border-gray-300 rounded text-sm text-gray-900 focus:outline-none focus:border-blue-500 resize-none"
                         rows={3}
                         onKeyPress={(e) => {
                           if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.currentTarget.value) {
@@ -1529,7 +1640,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                               textarea.value = '';
                             }
                           }}
-                          className="px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded text-sm transition-colors"
+                          className="px-4 py-2 bg-purple-500 hover:bg-purple-600 text-white rounded text-sm transition-colors"
                         >
                           Ask Coding Agent
                         </button>
@@ -1539,7 +1650,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
 
                     {/* LLM Response History */}
                     {llmResponseHistory.length > 0 && (
-                      <div className="bg-gray-700 rounded-lg p-3 flex-1 flex flex-col min-h-0">
+                      <div className="bg-gray-100 rounded-lg p-3 flex-1 flex flex-col min-h-0">
                         <div className="flex items-center justify-between mb-2">
                           <h3 className="text-sm font-medium text-gray-300">Conversation History</h3>
                           <button
@@ -1562,10 +1673,10 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                                         'Sensei (AI)';
 
                             return (
-                              <div key={index} className={`rounded p-2 text-xs bg-gray-800 border-l-2 ${borderColor}`}>
+                              <div key={index} className={`rounded p-2 text-xs bg-gray-50 border-l-2 ${borderColor}`}>
                                 <div className="flex items-center justify-between mb-1">
                                   <div className="flex items-center space-x-2">
-                                    <span className="text-gray-400">
+                                    <span className="text-gray-600">
                                       {item.timestamp.toLocaleTimeString()}
                                     </span>
                                     <span className={`text-[10px] font-medium ${labelColor}`}>
@@ -1576,7 +1687,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                                     <span className="text-green-400 text-[10px]">Approved</span>
                                   )}
                                 </div>
-                                <div className="text-gray-200 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto">
+                                <div className="text-gray-800 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto">
                                   {item.content}
                                 </div>
                               </div>
@@ -1595,7 +1706,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
       ) : servers.length > 0 ? (
         <div className="flex-1 flex flex-col">
           {/* Server Tabs */}
-          <div className="flex bg-gray-800 border-b border-gray-700 overflow-x-auto">
+          <div className="flex bg-white border-b border-gray-200 overflow-x-auto">
             {servers.map((server) => {
               const isActive = activeServerId === server.id;
               const statusColor = server.status === 'Running' ? 'text-green-400' :
@@ -1605,8 +1716,8 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
               return (
                 <div
                   key={server.id}
-                  className={`flex items-center px-4 py-3 cursor-pointer border-r border-gray-700 min-w-[200px] transition-colors ${
-                    isActive ? 'bg-gray-700 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-750'
+                  className={`flex items-center px-4 py-3 cursor-pointer border-r border-gray-200 min-w-[200px] transition-colors ${
+                    isActive ? 'bg-gray-100 text-gray-900' : 'bg-white text-gray-600 hover:bg-gray-50'
                   }`}
                   onClick={async () => {
                     setActiveServerId(server.id);
@@ -1631,7 +1742,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                               senseiService.toggleSensei(server.id, sessionIds[server.id], enabled);
                             }
                           }}
-                          className={`p-1.5 rounded transition-colors ${
+                          className={`p-1.5 rounded transition-colors relative ${
                             senseiEnabled[server.id]
                               ? 'text-blue-400 bg-blue-600/20'
                               : 'text-gray-500 hover:text-gray-300'
@@ -1639,6 +1750,11 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                           title="Toggle Sensei AI Assistant"
                         >
                           <Brain className="h-4 w-4" />
+                          {pendingSenseiCount > 0 && (
+                            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center font-bold">
+                              {pendingSenseiCount}
+                            </span>
+                          )}
                         </button>
                         <button
                           onClick={(e) => {
@@ -1658,8 +1774,8 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
           </div>
 
           {/* Terminal and Sensei Content */}
-          <div className="flex-1 bg-gray-900 flex overflow-hidden">
-            <div className="flex-1 bg-gray-900 overflow-hidden">
+          <div className="flex-1 bg-gray-50 flex">
+            <div className="flex-1 bg-gray-50">
               {activeServerId && sessionReady[activeServerId] ? (
                 <Terminal
                   key={`${activeServerId}-${sessionIds[activeServerId]}`}
@@ -1691,6 +1807,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                   <SenseiPanel
                     serverId={activeServerId}
                     sessionId={sessionIds[activeServerId]}
+                    onPendingCountChange={setPendingSenseiCount}
                     onExecuteCommand={(command) => {
                       // Command will be executed through event system
                       // Command execution is visible in terminal
@@ -1698,8 +1815,8 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
                     onOpenSettings={() => setShowSenseiSettings(true)}
                   />
                 ) : (
-                  <div className="flex flex-col h-full bg-gray-800 border-l border-gray-700">
-                    <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+                  <div className="flex flex-col h-full bg-white border-l border-gray-200">
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
                       <div className="flex items-center gap-2">
                         <Brain className="h-5 w-5 text-gray-500" />
                         <span className="font-medium text-gray-200">Sensei AI Assistant</span>
@@ -1721,20 +1838,20 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
           </div>
         </div>
       ) : (
-        <div className="flex-1 flex items-center justify-center bg-gray-900">
+        <div className="flex-1 flex items-center justify-center bg-gray-50">
           <div className="text-center">
-            <Server className="h-16 w-16 text-gray-600 mx-auto mb-4" />
-            <p className="text-gray-400 text-lg mb-2">No servers running for this project</p>
-            <p className="text-gray-500 text-sm">Click "Start Server" to launch a new OpenCode server</p>
+            <Monitor className="h-16 w-16 text-gray-600 mx-auto mb-4" />
+            <p className="text-gray-700 text-lg mb-2">No agents running for this project</p>
+            <p className="text-gray-600 text-sm">Click "Start Agent Session" to launch a new coding agent</p>
           </div>
         </div>
       )}
 
       {/* Sensei Settings Modal */}
-      {showSenseiSettings && activeServerId && sessionIds[activeServerId] && (
+      {showSenseiSettings && (
         <SenseiSettings
-          serverId={activeServerId}
-          sessionId={sessionIds[activeServerId]}
+          serverId={activeServerId || 'claude-code'}
+          sessionId={sessionIds[activeServerId] || claudeSessionId || 'claude-default'}
           isOpen={showSenseiSettings}
           onClose={() => setShowSenseiSettings(false)}
         />

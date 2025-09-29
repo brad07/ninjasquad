@@ -586,6 +586,49 @@ impl OpenCodeService {
         println!("Kill all servers complete. Cleared {} servers from tracking", servers_count);
         Ok(servers_count)
     }
+
+    pub async fn kill_tracked_servers_only(&self) -> Result<usize, String> {
+        println!("Killing only Ninja Squad tracked servers");
+
+        // Get list of PIDs we're tracking
+        let servers = self.servers.read().await;
+        let tracked_pids: Vec<u32> = servers
+            .values()
+            .filter_map(|s| s.process_id)
+            .collect();
+        drop(servers);
+
+        println!("Found {} PIDs to kill: {:?}", tracked_pids.len(), tracked_pids);
+
+        // Kill each tracked process by PID
+        for pid in &tracked_pids {
+            println!("Killing PID {}", pid);
+            let _ = tokio::process::Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .output()
+                .await;
+        }
+
+        // Also kill via our process handles
+        let mut processes = self.processes.write().await;
+        let process_count = processes.len();
+        println!("Killing {} tracked process handles", process_count);
+
+        for (id, mut child) in processes.drain() {
+            println!("Killing tracked process handle: {}", id);
+            let _ = child.kill().await;
+        }
+
+        // Clear only the servers we spawned from tracking
+        let mut servers = self.servers.write().await;
+        let before_count = servers.len();
+        servers.retain(|_, s| s.process_id.is_none());
+        let removed = before_count - servers.len();
+
+        println!("Killed {} Ninja Squad servers", removed);
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]

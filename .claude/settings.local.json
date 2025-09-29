@@ -26,7 +26,22 @@
       "Bash(osascript:*)",
       "Bash(wezterm cli spawn:*)",
       "Bash(wezterm cli:*)",
-      "WebFetch(domain:docs.rs)"
+      "WebFetch(domain:docs.rs)",
+      "Bash(npm search:*)",
+      "WebFetch(domain:www.retroui.dev)",
+      "Bash(npx:*)",
+      "Read(//Users/bradbond/Documents/Dev.nosync/Sandpit/TodoAppTest/**)",
+      "Bash(claude --print --add-dir .)",
+      "Bash(claude:*)",
+      "Bash(echo \"IMPORTANT: Only analyze and work with files in this directory: /Users/bradbond/Documents/Dev.nosync/Sandpit/TodoAppTest\nDo NOT look at files outside this directory.\n\nUser request: list all the HTML files in this directory\")",
+      "Bash(killall:*)",
+      "Bash(npm run:*)",
+      "Bash(timeout:*)",
+      "Bash(gtimeout:*)",
+      "Bash(grep:*)",
+      "Bash(npm ls:*)",
+      "WebFetch(domain:www.anthropic.com)",
+      "Bash(SLACK_SERVICE_PORT=3456 node slack-service.js)"
     ],
     "deny": [],
     "ask": []

@@ -1,0 +1,638 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { Send, FileText, Wrench, ChevronDown, ChevronRight, Check, X, Eye, EyeOff, Brain } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
+import type { PluginUIProps, ConversationMessage, Artifact, ToolUse } from '../../types/plugin';
+import { claudeCodeSDKService } from '../../services/ClaudeCodeSDKService';
+import { emit } from '@tauri-apps/api/event';
+
+/**
+ * Claude Code UI Component - Rich chat interface with artifacts and tool use visualization
+ */
+const ClaudeCodeUI: React.FC<PluginUIProps> = ({
+  plugin,
+  session,
+  server,
+  onCommand,
+  onToolApproval,
+  config
+}) => {
+  const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [selectedArtifact, setSelectedArtifact] = useState<Artifact | null>(null);
+  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
+  const [showToolDetails, setShowToolDetails] = useState(true);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [isInitialized, setIsInitialized] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Initialize Claude Code SDK when config changes
+  useEffect(() => {
+    const initializeSDK = async () => {
+      try {
+        console.log('Initializing Claude Code SDK with config:', {
+          model: config?.model || 'claude-sonnet-4-20250514',
+          workingDirectory: config?.workingDirectory,
+          fullConfig: config
+        });
+        await claudeCodeSDKService.initialize({
+          model: config?.model || 'claude-sonnet-4-20250514',
+          workingDirectory: config?.workingDirectory
+        });
+        setIsInitialized(true);
+      } catch (error) {
+        console.error('Failed to initialize Claude Code SDK:', error);
+        setIsInitialized(false);
+      }
+    };
+    initializeSDK();
+  }, [config]);
+
+  // Use passed session or create new one when initialized
+  useEffect(() => {
+    // If a session is passed via props, use that
+    if (session?.id) {
+      setSessionId(session.id);
+      console.log('Using existing Claude Code session:', session.id, 'with working directory:', config?.workingDirectory);
+
+      // Update the session with the working directory if it exists
+      if (config?.workingDirectory) {
+        claudeCodeSDKService.updateSessionWorkingDirectory(session.id, config.workingDirectory);
+      }
+    } else if (isInitialized && !sessionId) {
+      // Otherwise create a new session
+      const createSession = async () => {
+        try {
+          const workingDir = config?.workingDirectory || '.';
+          const newSessionId = await claudeCodeSDKService.createSession(undefined, workingDir);
+          setSessionId(newSessionId);
+          console.log('Claude Code session created:', newSessionId, 'with working directory:', workingDir);
+        } catch (error) {
+          console.error('Failed to create Claude Code session:', error);
+        }
+      };
+      createSession();
+    }
+  }, [isInitialized, sessionId, session, config]);
+
+  // Check for Sensei context availability and generate recommendations
+  useEffect(() => {
+    if (sessionId && senseiEnabled) {
+      const claudeSession = claudeCodeSDKService.getSession(sessionId);
+      if (claudeSession?.workingDirectory) {
+        const context = senseiService.getProjectContext(claudeSession.workingDirectory);
+        setHasSenseiContext(!!context);
+
+        // Generate Sensei recommendations based on recent messages
+        if (messages.length > 0 && senseiEnabled) {
+          generateSenseiRecommendations();
+        }
+      }
+    } else {
+      setHasSenseiContext(false);
+    }
+  }, [sessionId, messages, senseiEnabled]); // Check after each message
+
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const generateSenseiRecommendations = () => {
+    // Get the last message
+    const lastMessage = messages[messages.length - 1];
+    if (!lastMessage || lastMessage.role !== 'assistant') return;
+
+    // Check recent messages to avoid duplicate suggestions
+    const recentMessages = messages.slice(-5); // Check last 5 messages
+    const recentContent = recentMessages.map(m => m.content.toLowerCase()).join(' ');
+
+    // Generate sample recommendations based on the conversation
+    const newRecommendations = [];
+
+    // Check for common patterns and suggest relevant actions
+    // Only suggest if the command isn't already in recent messages
+    if ((lastMessage.content.toLowerCase().includes('file') || lastMessage.content.toLowerCase().includes('code'))
+        && !recentContent.includes('ls -la')) {
+      newRecommendations.push({
+        id: `rec-${Date.now()}-1`,
+        recommendation: 'Would you like me to review the current file structure?',
+        command: 'ls -la',
+        confidence: 0.8,
+        status: 'pending' as const
+      });
+    }
+
+    if ((lastMessage.content.toLowerCase().includes('error') || lastMessage.content.toLowerCase().includes('fix'))
+        && !recentContent.includes('npm test')) {
+      newRecommendations.push({
+        id: `rec-${Date.now()}-2`,
+        recommendation: 'Run tests to verify the fix?',
+        command: 'npm test',
+        confidence: 0.9,
+        status: 'pending' as const
+      });
+    }
+
+    if ((lastMessage.content.toLowerCase().includes('implement') || lastMessage.content.toLowerCase().includes('create'))
+        && !recentContent.includes('documentation')) {
+      newRecommendations.push({
+        id: `rec-${Date.now()}-3`,
+        recommendation: 'Generate documentation for the new implementation?',
+        confidence: 0.7,
+        status: 'pending' as const
+      });
+    }
+
+    // Only add new recommendations that aren't already in the list or in recent messages
+    if (newRecommendations.length > 0) {
+      setSenseiRecommendations(prev => {
+        const existingIds = new Set(prev.map(r => r.recommendation));
+        const uniqueNew = newRecommendations.filter(r => {
+          // Check if this recommendation or its command already exists
+          return !existingIds.has(r.recommendation) &&
+                 (!r.command || !recentContent.includes(r.command.toLowerCase()));
+        });
+        return [...prev, ...uniqueNew].slice(-5); // Keep only last 5 recommendations
+      });
+    }
+  };
+
+  const handleSenseiApproval = async (recId: string, approved: boolean) => {
+    setSenseiRecommendations(prev => prev.map(rec => {
+      if (rec.id === recId) {
+        return { ...rec, status: approved ? 'approved' : 'rejected' };
+      }
+      return rec;
+    }));
+
+    // If approved and has a command, execute it directly without adding to chat
+    const recommendation = senseiRecommendations.find(r => r.id === recId);
+    if (approved && recommendation?.command && sessionId) {
+      // Don't add as a user message, just execute directly
+      setIsLoading(true);
+
+      try {
+        const assistantMessageId = `msg-${Date.now()}`;
+
+        // Add a system note that Sensei recommendation was approved
+        const systemNote: ConversationMessage = {
+          id: `msg-${Date.now() - 1}`,
+          role: 'user',
+          content: `[Sensei Approved: ${recommendation.command}]`,
+          timestamp: new Date().toISOString()
+        };
+        setMessages(prev => [...prev, systemNote]);
+
+        // Create assistant message for the response
+        const assistantMessage: ConversationMessage = {
+          id: assistantMessageId,
+          role: 'assistant',
+          content: '',
+          timestamp: new Date().toISOString()
+        };
+        setMessages(prev => [...prev, assistantMessage]);
+
+        // Stream the response
+        const response = await claudeCodeSDKService.streamMessage(
+          sessionId,
+          recommendation.command,
+          (chunk: string) => {
+            setMessages(prev => prev.map(msg =>
+              msg.id === assistantMessageId
+                ? { ...msg, content: msg.content + chunk }
+                : msg
+            ));
+          }
+        );
+
+        setIsLoading(false);
+      } catch (error) {
+        console.error('Failed to execute Sensei recommendation:', error);
+        setIsLoading(false);
+      }
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if (!input.trim() || !sessionId) return;
+
+    const messageContent = input.trim();
+    const userMessage: ConversationMessage = {
+      id: `msg-${Date.now()}`,
+      role: 'user',
+      content: messageContent,
+      timestamp: new Date().toISOString()
+    };
+
+    const assistantMessageId = `msg-${Date.now() + 1}`;
+
+    setMessages(prev => [...prev, userMessage]);
+    setInput('');
+    setIsLoading(true);
+
+    try {
+      // Create initial assistant message for streaming
+      const assistantMessage: ConversationMessage = {
+        id: assistantMessageId,
+        role: 'assistant',
+        content: '',
+        timestamp: new Date().toISOString()
+      };
+
+      setMessages(prev => [...prev, assistantMessage]);
+
+      // Stream message to Claude Code SDK
+      const response = await claudeCodeSDKService.streamMessage(
+        sessionId,
+        messageContent,
+        (chunk: string) => {
+          // Update the assistant message with streaming chunks
+          setMessages(prev => prev.map(msg =>
+            msg.id === assistantMessageId
+              ? { ...msg, content: msg.content + chunk }
+              : msg
+          ));
+        }
+      );
+
+      // Parse response for tool uses if any
+      const toolUses: ToolUse[] = [];
+      // Check if response mentions file operations or commands
+      if (response.includes('Reading file') || response.includes('read file')) {
+        toolUses.push({
+          toolName: 'read_file',
+          parameters: { action: 'read' },
+          status: 'completed',
+          result: 'File operation completed'
+        });
+      }
+
+      // Update final message with tool uses if any
+      if (toolUses.length > 0) {
+        setMessages(prev => prev.map(msg =>
+          msg.id === assistantMessageId
+            ? { ...msg, toolUses }
+            : msg
+        ));
+      }
+
+      setIsLoading(false);
+
+      // Emit event for Sensei to capture
+      await emit('claude-code-output', {
+        sessionId,
+        message: messageContent,
+        response,
+        timestamp: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('Failed to send message:', error);
+
+      // Show error message to user
+      const errorMessage: ConversationMessage = {
+        id: assistantMessageId,
+        role: 'assistant',
+        content: `Error: ${error instanceof Error ? error.message : 'Failed to send message. Please check your API key and try again.'}`,
+        timestamp: new Date().toISOString()
+      };
+
+      setMessages(prev => prev.map(msg =>
+        msg.id === assistantMessageId ? errorMessage : msg
+      ));
+      setIsLoading(false);
+    }
+  };
+
+  const handleToolApproval = (toolUse: ToolUse, approved: boolean) => {
+    if (onToolApproval) {
+      onToolApproval(toolUse, approved);
+    }
+  };
+
+  const toggleToolExpansion = (toolId: string) => {
+    setExpandedTools(prev => {
+      const next = new Set(prev);
+      if (next.has(toolId)) {
+        next.delete(toolId);
+      } else {
+        next.add(toolId);
+      }
+      return next;
+    });
+  };
+
+  const renderToolUse = (tool: ToolUse, index: number) => {
+    const toolId = `tool-${index}`;
+    const isExpanded = expandedTools.has(toolId);
+
+    return (
+      <div key={toolId} className="mt-2 bg-gray-800 rounded-lg p-3">
+        <div className="flex items-center justify-between">
+          <button
+            onClick={() => toggleToolExpansion(toolId)}
+            className="flex items-center space-x-2 text-sm text-blue-400 hover:text-blue-300"
+          >
+            {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+            <Wrench className="w-4 h-4" />
+            <span>{tool.toolName}</span>
+            <span className={`px-2 py-0.5 rounded text-xs ${
+              tool.status === 'completed' ? 'bg-green-900 text-green-300' :
+              tool.status === 'running' ? 'bg-yellow-900 text-yellow-300' :
+              tool.status === 'failed' ? 'bg-red-900 text-red-300' :
+              tool.status === 'requires_approval' ? 'bg-purple-900 text-purple-300' :
+              'bg-gray-700 text-gray-300'
+            }`}>
+              {tool.status}
+            </span>
+          </button>
+
+          {tool.status === 'requires_approval' && (
+            <div className="flex space-x-2">
+              <button
+                onClick={() => handleToolApproval(tool, true)}
+                className="p-1 bg-green-600 hover:bg-green-700 rounded"
+                title="Approve"
+              >
+                <Check className="w-4 h-4 text-white" />
+              </button>
+              <button
+                onClick={() => handleToolApproval(tool, false)}
+                className="p-1 bg-red-600 hover:bg-red-700 rounded"
+                title="Deny"
+              >
+                <X className="w-4 h-4 text-white" />
+              </button>
+            </div>
+          )}
+        </div>
+
+        {isExpanded && (
+          <div className="mt-2 space-y-2">
+            <div className="text-xs text-gray-400">
+              <strong>Parameters:</strong>
+              <pre className="mt-1 p-2 bg-gray-900 rounded overflow-x-auto">
+                {JSON.stringify(tool.parameters, null, 2)}
+              </pre>
+            </div>
+            {tool.result && (
+              <div className="text-xs text-gray-400">
+                <strong>Result:</strong>
+                <pre className="mt-1 p-2 bg-gray-900 rounded overflow-x-auto">
+                  {tool.result}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const renderMessage = (message: ConversationMessage) => {
+    const isUser = message.role === 'user';
+
+    return (
+      <div key={message.id} className={`flex ${isUser ? 'justify-end' : 'justify-start'} mb-4`}>
+        <div className={`max-w-3xl ${isUser ? 'ml-12' : 'mr-12'}`}>
+          <div className={`rounded-lg p-4 ${
+            isUser ? 'bg-blue-600 text-white' : 'bg-gray-800 text-gray-100'
+          }`}>
+            <div className="prose prose-invert max-w-none">
+              {message.content.split('\n').map((line, i) => (
+                <p key={i} className="mb-2 last:mb-0">{line}</p>
+              ))}
+            </div>
+
+            {message.toolUses && message.toolUses.length > 0 && (
+              <div className="mt-3 space-y-1">
+                {message.toolUses.map((tool, i) => renderToolUse(tool, i))}
+              </div>
+            )}
+
+            {message.artifacts && message.artifacts.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {message.artifacts.map(artifact => (
+                  <button
+                    key={artifact.id}
+                    onClick={() => setSelectedArtifact(artifact)}
+                    className="flex items-center space-x-1 px-2 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs"
+                  >
+                    <FileText className="w-3 h-3" />
+                    <span>{artifact.name}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="mt-1 text-xs text-gray-500">
+            {new Date(message.timestamp).toLocaleTimeString()}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // Check if Claude Code CLI is available
+  const checkClaudeCodeAvailable = async () => {
+    try {
+      await invoke('check_claude_code_available');
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  if (!isInitialized) {
+    return (
+      <div className="flex-1 flex items-center justify-center text-gray-500">
+        <div className="text-center">
+          <FileText className="w-12 h-12 mx-auto mb-4 text-gray-600" />
+          <p className="text-lg font-semibold mb-2">Setting up Claude Code</p>
+          <p className="text-sm mb-4">Claude Code uses your system's existing authentication</p>
+          <div className="bg-gray-800 p-4 rounded-lg max-w-md mx-auto">
+            <p className="text-xs text-gray-400 mb-2">Make sure Claude Code is installed:</p>
+            <ol className="text-xs text-gray-400 text-left space-y-1">
+              <li>1. Install Claude Code: <code className="bg-gray-700 px-1 rounded">npm install -g @anthropic-ai/claude-code</code></li>
+              <li>2. Authenticate: <code className="bg-gray-700 px-1 rounded">claude auth</code></li>
+              <li>3. Claude Code will use your existing authentication</li>
+              <li>4. No API key needed in this app!</li>
+            </ol>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-full bg-gray-900">
+      {/* Main Chat Area */}
+      <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 flex flex-col">
+          {/* Fixed Header */}
+          <div className="flex-shrink-0 p-4 bg-gray-800 border-b border-gray-700">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-3">
+                <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-blue-500 rounded-lg" />
+                <div>
+                  <h3 className="font-semibold text-white flex items-center gap-2">
+                    Claude Code
+                    {senseiEnabled && hasSenseiContext && (
+                      <span className="flex items-center gap-1 text-xs bg-green-900/50 text-green-400 px-2 py-1 rounded-full">
+                        <Brain className="w-3 h-3" />
+                        Sensei Active
+                      </span>
+                    )}
+                  </h3>
+                  <p className="text-xs text-gray-400">
+                    {sessionId ? `Session: ${sessionId.slice(0, 8)}... | Model: ${claudeCodeSDKService.getModel()}` : 'Initializing...'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setSenseiEnabled(!senseiEnabled)}
+                  className={`flex items-center space-x-1 px-3 py-1 rounded text-sm transition-colors ${
+                    senseiEnabled
+                      ? 'bg-green-900/50 hover:bg-green-900/70 text-green-400'
+                      : 'bg-gray-700 hover:bg-gray-600 text-gray-300'
+                  }`}
+                  title={senseiEnabled ? 'Disable Sensei Knowledge Base' : 'Enable Sensei Knowledge Base'}
+                >
+                  <Brain className="w-4 h-4" />
+                  <span>Sensei {senseiEnabled ? 'ON' : 'OFF'}</span>
+                </button>
+                <button
+                  onClick={() => setShowToolDetails(!showToolDetails)}
+                  className="flex items-center space-x-1 px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-sm text-gray-300"
+                >
+                  {showToolDetails ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  <span>Tool Details</span>
+                </button>
+              </div>
+          </div>
+        </div>
+
+        {/* Fixed Sensei Recommendations Panel */}
+        {senseiEnabled && senseiRecommendations.filter(r => r.status === 'pending').length > 0 && (
+          <div className="flex-shrink-0 bg-gray-900 border-b border-gray-700 p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <Brain className="w-4 h-4 text-green-400" />
+              <span className="text-sm font-semibold text-gray-300">Sensei Recommendations</span>
+            </div>
+            <div className="space-y-2 max-h-32 overflow-y-auto">
+              {senseiRecommendations.filter(r => r.status === 'pending').map(rec => (
+                <div key={rec.id} className="flex items-center justify-between bg-gray-800 rounded p-2">
+                  <div className="flex-1">
+                    <p className="text-sm text-gray-300">{rec.recommendation}</p>
+                    {rec.command && (
+                      <code className="text-xs text-gray-500 mt-1 block">Command: {rec.command}</code>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 ml-3">
+                    <span className="text-xs text-gray-500">
+                      {Math.round(rec.confidence * 100)}%
+                    </span>
+                    <button
+                      onClick={() => handleSenseiApproval(rec.id, true)}
+                      className="p-1 bg-green-600 hover:bg-green-700 rounded text-white"
+                      title="Approve"
+                    >
+                      <Check className="w-3 h-3" />
+                    </button>
+                    <button
+                      onClick={() => handleSenseiApproval(rec.id, false)}
+                      className="p-1 bg-red-600 hover:bg-red-700 rounded text-white"
+                      title="Reject"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Scrollable Messages Container */}
+        <div className="flex-1 overflow-y-scroll p-4" style={{ maxHeight: 'calc(100vh - 300px)' }}>
+          {messages.length === 0 ? (
+            <div className="text-center text-gray-500 mt-8">
+              <p className="text-lg mb-2">Start a conversation with Claude</p>
+              <p className="text-sm">Ask me to help with your code, explain concepts, or build features</p>
+            </div>
+          ) : (
+            messages.map(renderMessage)
+          )}
+          {isLoading && (
+            <div className="flex justify-start mb-4">
+              <div className="bg-gray-800 rounded-lg p-4">
+                <div className="flex space-x-2">
+                  <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse" />
+                  <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse delay-75" />
+                  <div className="w-2 h-2 bg-gray-500 rounded-full animate-pulse delay-150" />
+                </div>
+              </div>
+            </div>
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+
+        {/* Fixed Input Area */}
+        <div className="flex-shrink-0 p-4 bg-gray-800 border-t border-gray-700">
+          <div className="flex space-x-2">
+            <textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSendMessage();
+                }
+              }}
+              placeholder="Ask Claude to help with your code... (Enter to send, Shift+Enter for new line)"
+              className="flex-1 px-3 py-2 bg-gray-900 border border-gray-700 rounded-lg text-white resize-none focus:outline-none focus:border-blue-500"
+              rows={3}
+            />
+            <button
+              onClick={handleSendMessage}
+              disabled={!input.trim() || isLoading}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-700 disabled:text-gray-500 text-white rounded-lg transition-colors"
+              data-send-button
+            >
+              <Send className="w-5 h-5" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Artifacts Panel */}
+      {selectedArtifact && (
+        <div className="w-96 border-l border-gray-700 flex flex-col bg-gray-850">
+          <div className="flex-shrink-0 p-4 bg-gray-800 border-b border-gray-700 flex items-center justify-between">
+            <h3 className="font-semibold text-white">Artifact: {selectedArtifact.name}</h3>
+            <button
+              onClick={() => setSelectedArtifact(null)}
+              className="p-1 hover:bg-gray-700 rounded"
+            >
+              <X className="w-4 h-4 text-gray-400" />
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 min-h-0">
+            <pre className="text-sm text-gray-300 font-mono">
+              <code>{selectedArtifact.content}</code>
+            </pre>
+          </div>
+        </div>
+      )}
+      </div>
+    </div>
+  );
+};
+
+export default ClaudeCodeUI;

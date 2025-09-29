@@ -1,0 +1,116 @@
+@keyframes senseiColorShift {
+  0%, 100% {
+    background: linear-gradient(135deg, #e9d5ff 0%, #c084fc 50%, #a78bfa 100%);
+  }
+  25% {
+    background: linear-gradient(135deg, #bfdbfe 0%, #60a5fa 50%, #3b82f6 100%);
+  }
+  50% {
+    background: linear-gradient(135deg, #fef3c7 0%, #fbbf24 50%, #f59e0b 100%);
+  }
+  75% {
+    background: linear-gradient(135deg, #fecaca 0%, #f87171 50%, #ef4444 100%);
+  }
+}
+
+@keyframes senseiPulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.9;
+  }
+}
+
+/* Always-on animated background for entire Sensei panel */
+.sensei-animated-bg {
+  background-size: 400% 400%;
+  background-image: linear-gradient(
+    -45deg,
+    #667eea 0%,
+    #764ba2 10%,
+    #f093fb 20%,
+    #f5576c 30%,
+    #f59e0b 40%,
+    #fbbf24 50%,
+    #34d399 60%,
+    #60a5fa 70%,
+    #818cf8 80%,
+    #c084fc 90%,
+    #667eea 100%
+  );
+  animation: senseiRainbow 15s ease infinite;
+}
+
+/* Subtle animation when analyzing */
+.sensei-analyzing-bg {
+  background-size: 200% 200%;
+  background-image: linear-gradient(
+    135deg,
+    #e9d5ff 0%,
+    #ddd6fe 25%,
+    #c7d2fe 50%,
+    #ddd6fe 75%,
+    #e9d5ff 100%
+  );
+  animation: senseiSubtleShift 6s ease-in-out infinite;
+}
+
+@keyframes senseiSubtleShift {
+  0%, 100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+@keyframes senseiRainbow {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes senseiWave {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  25% {
+    transform: translateY(-2px);
+  }
+  75% {
+    transform: translateY(2px);
+  }
+}
+
+@keyframes senseiGradientMove {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@keyframes pulseGlow {
+  0%, 100% {
+    box-shadow: 0 0 10px rgba(147, 51, 234, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(147, 51, 234, 0.3);
+  }
+}
+
+.sensei-analyzing-glow {
+  animation: pulseGlow 3s ease-in-out infinite;
+  transition: all 0.3s ease;
+}

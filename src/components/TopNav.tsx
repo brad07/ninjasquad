@@ -5,11 +5,13 @@ import {
   ServerIcon,
   RectangleGroupIcon,
   QueueListIcon,
-  BeakerIcon,
-  CommandLineIcon,
-} from '@heroicons/react/24/outline';
+  FolderIcon,
+  PaintBrushIcon,
+  KeyIcon,
+  CheckCircleIcon,
+} from '@heroicons/react/24/solid';
 
-export type MainView = 'dashboard' | 'servers' | 'sessions' | 'tasks' | 'distributed-test' | 'sdk-test' | 'projects' | 'tmux-lab';
+export type MainView = 'dashboard' | 'servers' | 'sessions' | 'tasks' | 'projects' | 'retroui' | 'admin' | 'linear';
 
 interface TopNavProps {
   currentView: MainView;
@@ -18,20 +20,21 @@ interface TopNavProps {
 
 const TopNav: React.FC<TopNavProps> = ({ currentView, onViewChange }) => {
   const tabs = [
+    { id: 'projects' as MainView, label: 'Projects', icon: FolderIcon },
+    { id: 'linear' as MainView, label: 'Linear', icon: CheckCircleIcon },
     { id: 'dashboard' as MainView, label: 'Dashboard', icon: HomeIcon },
     { id: 'servers' as MainView, label: 'Servers', icon: ServerIcon },
     { id: 'sessions' as MainView, label: 'Sessions', icon: RectangleGroupIcon },
     { id: 'tasks' as MainView, label: 'Tasks', icon: QueueListIcon },
-    { id: 'distributed-test' as MainView, label: 'Test Mode', icon: BeakerIcon },
-    { id: 'sdk-test' as MainView, label: 'SDK Test', icon: CommandLineIcon },
-    { id: 'tmux-lab' as MainView, label: 'Tmux Lab', icon: BeakerIcon },
+    { id: 'admin' as MainView, label: 'Admin', icon: KeyIcon },
+    { id: 'retroui' as MainView, label: 'RetroUI', icon: PaintBrushIcon },
   ];
 
   return (
-    <div className="bg-gray-900 border-b border-gray-800">
-      <div className="flex items-center justify-between px-6 py-3">
-        <h1 className="text-xl font-bold text-white">Ninja Squad</h1>
-        <nav className="flex space-x-1">
+    <div className="bg-white border-b-4 border-black">
+      <div className="flex items-center justify-between px-6 py-4 bg-gradient-to-r from-yellow-100 via-orange-50 to-pink-100">
+        <h1 className="text-2xl font-black text-black tracking-tight">🥷 NINJA SQUAD</h1>
+        <nav className="flex space-x-2">
           {tabs.map((tab) => {
             const Icon = tab.icon;
             return (
@@ -39,14 +42,14 @@ const TopNav: React.FC<TopNavProps> = ({ currentView, onViewChange }) => {
                 key={tab.id}
                 onClick={() => onViewChange(tab.id)}
                 className={clsx(
-                  'flex items-center space-x-2 px-4 py-2 rounded-lg transition-colors text-sm font-medium',
+                  'flex items-center space-x-2 px-4 py-2 transition-all text-sm font-bold border-2 rounded',
                   currentView === tab.id
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200'
+                    ? 'bg-purple-300 text-black border-black shadow-[3px_3px_0px_0px_rgba(0,0,0,1)]'
+                    : 'bg-white text-gray-700 border-transparent hover:border-black hover:text-black hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:bg-purple-50'
                 )}
               >
-                <Icon className="h-4 w-4" />
-                <span>{tab.label}</span>
+                <Icon className="h-4 w-4" strokeWidth={2.5} />
+                <span className="uppercase tracking-wider text-xs">{tab.label}</span>
               </button>
             );
           })}

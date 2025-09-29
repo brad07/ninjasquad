@@ -1,5 +1,20 @@
 # Claude Development Guidelines for Ninja Squad
 
+## SDK Migration Note (2025)
+
+This project has been migrated from `@anthropic-ai/claude-code` v2.0.0 to `@anthropic-ai/claude-agent-sdk` v0.1.0.
+
+**Key Changes:**
+- Package name changed from "Claude Code SDK" to "Claude Agent SDK"
+- The SDK now supports broader use cases beyond just coding
+- Our implementation uses the Claude CLI, which internally uses the Agent SDK
+- No breaking changes to functionality - the CLI interface remains stable
+
+**Architecture:**
+- Frontend: Uses `ClaudeCodeSDKService` that wraps Tauri commands
+- Backend: Rust spawns `claude` CLI processes (CLI uses Agent SDK internally)
+- The CLI handles all authentication and session management
+
 ## Critical: Tauri Parameter Naming Convention
 
 ⚠️ **IMPORTANT UPDATE**: There's inconsistency in how Tauri handles parameter names. Testing shows that some commands require snake_case parameters from the frontend.

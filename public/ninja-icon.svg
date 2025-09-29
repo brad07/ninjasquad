@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- Ninja head/mask -->
+  <circle cx="256" cy="256" r="180" fill="#2c2c2c"/>
+
+  <!-- Eye band -->
+  <rect x="76" y="220" width="360" height="60" fill="#1a1a1a"/>
+
+  <!-- Eyes -->
+  <ellipse cx="180" cy="250" rx="25" ry="18" fill="#ffffff"/>
+  <ellipse cx="332" cy="250" rx="25" ry="18" fill="#ffffff"/>
+
+  <!-- Eye pupils -->
+  <circle cx="185" cy="250" r="12" fill="#000000"/>
+  <circle cx="337" cy="250" r="12" fill="#000000"/>
+
+  <!-- Ninja headband tails -->
+  <path d="M 436 250 L 480 230 L 485 240 L 445 260 Z" fill="#cc0000"/>
+  <path d="M 436 250 L 480 270 L 485 260 L 445 240 Z" fill="#cc0000"/>
+</svg>

@@ -6,16 +6,22 @@ pub mod pty;
 pub mod database;
 pub mod projects;
 pub mod queue;
+pub mod plugins;
+pub mod claude;
+pub mod slack;
 
 #[cfg(feature = "tauri-app")]
 mod tauri_app {
     use crate::opencode::{OpenCodeServer, OpenCodeService};
     use crate::session::{SessionManager, OrchestratorSession};
     use crate::wezterm::{WezTermController, WezTermWindow, MirrorManager, WezTermMirror};
-    use crate::tmux::{TmuxManager, TmuxSession, TmuxOutput};
+    use crate::tmux::{TmuxManager, TmuxSession};
     use crate::pty::{PtyManager, TerminalSession};
     use crate::database::DatabaseManager;
     use crate::queue::{QueueClient, WorkerService, QueueConfig, WorkerInfo, TaskMessage, TaskType, TaskResult, LocalTestMode};
+    use crate::plugins::manager::PluginManager;
+    use crate::claude::{ClaudeProcessManager, ClaudeSession};
+    use crate::slack::{SlackService, SlackConfig, SlackApprovalRequest, SlackMessage};
     use std::sync::{Arc, Mutex};
     use tokio::sync::Mutex as AsyncMutex;
     use tauri::{Manager, State};
@@ -26,10 +32,13 @@ mod tauri_app {
         wezterm_mirror_manager: Arc<AsyncMutex<MirrorManager>>,
         tmux_manager: Arc<AsyncMutex<TmuxManager>>,
         session_manager: Arc<SessionManager>,
+        claude_manager: Arc<ClaudeProcessManager>,
         pty_manager: Arc<Mutex<PtyManager>>,
         queue_client: Arc<dyn QueueClient>,
         worker_service: Option<Arc<WorkerService>>,
         local_test_mode: Arc<AsyncMutex<Option<LocalTestMode>>>,
+        plugin_manager: Arc<AsyncMutex<PluginManager>>,
+        slack_service: Arc<SlackService>,
     }
 
     #[tauri::command]
@@ -61,6 +70,37 @@ mod tauri_app {
         println!("Kill all servers command invoked");
         let count = state.opencode_service.kill_all_servers().await?;
         println!("Successfully killed {} servers and processes", count);
+        Ok(count)
+    }
+
+    #[tauri::command]
+    async fn get_ninja_squad_processes(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+        let servers = state.opencode_service.list_servers().await;
+        let result: Vec<serde_json::Value> = servers
+            .into_iter()
+            .filter(|s| s.process_id.is_some()) // Only servers we spawned have PIDs
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "type": if s.id.starts_with("tui-") { "opencode-tui" } else { "opencode" },
+                    "port": s.port,
+                    "pid": s.process_id,
+                    "status": format!("{:?}", s.status),
+                    "working_dir": s.working_dir
+                })
+            })
+            .collect();
+
+        // Note: Claude Code processes would need separate tracking
+        // Currently we're only tracking OpenCode processes spawned by Ninja Squad
+        Ok(result)
+    }
+
+    #[tauri::command]
+    async fn kill_ninja_squad_processes_only(state: State<'_, AppState>) -> Result<usize, String> {
+        println!("Killing only Ninja Squad spawned processes");
+        let count = state.opencode_service.kill_tracked_servers_only().await?;
+        println!("Successfully killed {} Ninja Squad processes", count);
         Ok(count)
     }
 
@@ -472,6 +512,249 @@ mod tauri_app {
         Ok(tmux_manager.list_sessions().await)
     }
 
+    // Slack Commands
+    #[tauri::command]
+    async fn start_slack_service(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        state.slack_service.start(&app).await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn stop_slack_service(
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        state.slack_service.stop().await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn initialize_slack(
+        config: SlackConfig,
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        state.slack_service.initialize(config).await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn send_slack_approval(
+        request: SlackApprovalRequest,
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        state.slack_service.send_approval_request(request).await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn send_slack_message(
+        message: SlackMessage,
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        state.slack_service.send_message(message).await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn shutdown_slack(
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        state.slack_service.shutdown().await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn get_slack_status(
+        state: State<'_, AppState>,
+    ) -> Result<serde_json::Value, String> {
+        state.slack_service.status().await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn initialize_plugins(
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        let pm = state.plugin_manager.lock().await;
+
+        // Register OpenCode plugin if not already registered
+        if !pm.has_plugin("opencode").await {
+            let opencode_plugin = Box::new(crate::plugins::opencode::OpenCodePlugin::new());
+            pm.register_plugin(opencode_plugin).await?;
+            println!("Registered OpenCode plugin");
+        } else {
+            println!("OpenCode plugin already registered");
+        }
+
+        // Register Claude Code plugin if not already registered
+        if !pm.has_plugin("claude-code").await {
+            let claude_plugin = Box::new(crate::plugins::claude_code::ClaudeCodePlugin::new());
+            pm.register_plugin(claude_plugin).await?;
+            println!("Registered Claude Code plugin");
+        } else {
+            println!("Claude Code plugin already registered");
+        }
+
+        println!("Plugins initialization complete");
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn list_plugins(
+        state: State<'_, AppState>,
+    ) -> Result<Vec<crate::plugins::types::PluginConfig>, String> {
+        let pm = state.plugin_manager.lock().await;
+        Ok(pm.list_plugins().await)
+    }
+
+    #[tauri::command]
+    async fn get_active_plugin(
+        state: State<'_, AppState>,
+    ) -> Result<String, String> {
+        let pm = state.plugin_manager.lock().await;
+        pm.get_active_plugin().await
+    }
+
+    #[tauri::command]
+    async fn set_active_plugin(
+        plugin_id: String,
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        let pm = state.plugin_manager.lock().await;
+        pm.set_active_plugin(&plugin_id).await
+    }
+
+    #[tauri::command]
+    async fn check_claude_code_available() -> Result<bool, String> {
+        // Check if Claude Code CLI is installed
+        match std::process::Command::new("which")
+            .arg("claude")
+            .output()
+        {
+            Ok(output) => Ok(output.status.success()),
+            Err(_) => Ok(false)
+        }
+    }
+
+    // Linear-specific commands
+    #[tauri::command]
+    async fn update_linear_config(
+        config: serde_json::Value,
+        _state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        println!("Linear config updated: {:?}", config);
+        // Store config securely if needed
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn assign_issue_to_agent(
+        assignment: serde_json::Value,
+        _state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        println!("Issue assigned to agent: {:?}", assignment);
+        // Here we would integrate with the actual agent system
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn execute_agent_task(
+        issue_id: String,
+        agent_id: String,
+        _issue: serde_json::Value,
+        _plan: serde_json::Value,
+        _state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        println!("Executing task for issue {} with agent {}", issue_id, agent_id);
+        // Here we would route to the appropriate agent
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn test_claude_ping() -> Result<String, String> {
+        println!("test_claude_ping called");
+        Ok("Claude test ping successful".to_string())
+    }
+
+    // New Claude session management commands
+    #[tauri::command]
+    async fn claude_create_session(
+        state: State<'_, AppState>,
+        project_id: String,
+        working_directory: Option<String>,
+        model: Option<String>
+    ) -> Result<String, String> {
+        println!("[claude_create_session] Creating session for project: {}", project_id);
+        state.claude_manager.create_session(project_id, working_directory, model).await
+    }
+
+    #[tauri::command]
+    async fn claude_send_message(
+        state: State<'_, AppState>,
+        session_id: String,
+        message: String
+    ) -> Result<String, String> {
+        println!("[claude_send_message] Session: {}, Message length: {} chars", session_id, message.len());
+        state.claude_manager.send_message(&session_id, message).await
+    }
+
+    #[tauri::command]
+    async fn claude_close_session(
+        state: State<'_, AppState>,
+        session_id: String
+    ) -> Result<(), String> {
+        println!("[claude_close_session] Closing session: {}", session_id);
+        state.claude_manager.close_session(&session_id).await
+    }
+
+    #[tauri::command]
+    async fn claude_list_sessions(
+        state: State<'_, AppState>
+    ) -> Result<Vec<ClaudeSession>, String> {
+        Ok(state.claude_manager.list_sessions().await)
+    }
+
+    #[tauri::command]
+    async fn claude_get_session(
+        state: State<'_, AppState>,
+        session_id: String
+    ) -> Result<Option<ClaudeSession>, String> {
+        Ok(state.claude_manager.get_session(&session_id).await)
+    }
+
+    // Legacy execute_claude_code - now uses session manager internally
+    #[tauri::command]
+    async fn execute_claude_code(
+        state: State<'_, AppState>,
+        prompt: String,
+        model: Option<String>,
+        working_directory: Option<String>
+    ) -> Result<String, String> {
+        // Legacy support - now uses the session manager for better efficiency
+        println!("[execute_claude_code] Legacy call - creating temporary session");
+
+        // Create a temporary session for this one-off command
+        let session_id = state.claude_manager
+            .create_session(
+                "legacy-temp".to_string(),
+                working_directory.clone(),
+                model.clone()
+            )
+            .await?;
+
+        // Send the message
+        let response = state.claude_manager
+            .send_message(&session_id, prompt)
+            .await?;
+
+        // Clean up the session
+        let _ = state.claude_manager.close_session(&session_id).await;
+
+        Ok(response)
+    }
+
     #[cfg_attr(mobile, tauri::mobile_entry_point)]
     pub fn run() {
         let queue_config = QueueConfig::default();
@@ -493,6 +776,11 @@ mod tauri_app {
 
         let mirror_manager = Arc::new(AsyncMutex::new(MirrorManager::new()));
         let tmux_manager = Arc::new(AsyncMutex::new(TmuxManager::new()));
+        let plugin_manager = Arc::new(AsyncMutex::new(PluginManager::new()));
+        let claude_manager = Arc::new(ClaudeProcessManager::new());
+        let slack_service = Arc::new(SlackService::new(3456));
+
+        // Initialize plugins will be done after app setup when we have an async runtime
 
         let app_state = AppState {
             opencode_service,
@@ -500,10 +788,13 @@ mod tauri_app {
             wezterm_mirror_manager: mirror_manager.clone(),
             tmux_manager: tmux_manager.clone(),
             session_manager,
+            claude_manager,
             pty_manager: pty_manager.clone(),
             queue_client,
             worker_service,
             local_test_mode: Arc::new(AsyncMutex::new(None)),
+            plugin_manager,
+            slack_service,
         };
 
         tauri::Builder::default()
@@ -516,6 +807,8 @@ mod tauri_app {
                 list_opencode_servers,
                 stop_opencode_server,
                 kill_all_servers,
+                get_ninja_squad_processes,
+                kill_ninja_squad_processes_only,
                 scan_for_servers,
                 health_check_server,
                 create_wezterm_domain,
@@ -557,6 +850,28 @@ mod tauri_app {
                 send_tmux_command,
                 capture_tmux_pane,
                 list_tmux_sessions,
+                start_slack_service,
+                stop_slack_service,
+                initialize_slack,
+                send_slack_approval,
+                send_slack_message,
+                shutdown_slack,
+                get_slack_status,
+                initialize_plugins,
+                list_plugins,
+                get_active_plugin,
+                set_active_plugin,
+                check_claude_code_available,
+                execute_claude_code,
+                claude_create_session,
+                claude_send_message,
+                claude_close_session,
+                claude_list_sessions,
+                claude_get_session,
+                test_claude_ping,
+                update_linear_config,
+                assign_issue_to_agent,
+                execute_agent_task,
                 crate::projects::create_project,
                 crate::projects::get_project,
                 crate::projects::get_project_by_path,

@@ -387,8 +387,8 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
         const sdkCount = await opencodeSDKService.disconnectAllSDKServers();
         console.log(`Disconnected ${sdkCount} SDK connections`);
 
-        const count = await invoke<number>('kill_all_servers');
-        console.log(`Killed ${count} server processes via Tauri`);
+        const count = await invoke<number>('kill_ninja_squad_processes_only');
+        console.log(`Killed ${count} Ninja Squad server processes via Tauri`);
 
         totalKilled = sdkCount + count;
 
@@ -398,8 +398,8 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
           type: 'success'
         });
       } else {
-        // Process Mode: Use existing Tauri command (also kills orphaned processes)
-        const count = await invoke<number>('kill_all_servers');
+        // Process Mode: Use existing Tauri command (kills only our tracked processes)
+        const count = await invoke<number>('kill_ninja_squad_processes_only');
         totalKilled = count;
 
         // Show success toast
@@ -553,14 +553,15 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
                 Confirm Kill All Servers
               </h2>
               <p className="text-gray-700 dark:text-gray-300 mb-4">
-                Are you sure you want to kill ALL OpenCode servers?
+                Are you sure you want to kill all Ninja Squad servers?
               </p>
               <div className="mb-6 space-y-2 text-sm text-gray-600 dark:text-gray-400">
                 <p>This will:</p>
                 <ul className="list-disc list-inside space-y-1 ml-2">
-                  <li>Stop all running servers</li>
-                  <li>Terminate orphaned processes</li>
-                  <li>Clear all active connections</li>
+                  <li>Stop all servers spawned by Ninja Squad</li>
+                  <li>Terminate only our tracked processes</li>
+                  <li>Clear all active SDK connections</li>
+                  <li>Will NOT affect Claude Code or other OpenCode instances</li>
                 </ul>
               </div>
               <div className="flex justify-end gap-3">
@@ -757,7 +758,7 @@ const ServerControl: React.FC<ServerControlProps> = ({ servers, onServersUpdate,
             </div>
 
             {/* Terminal and Sensei Content */}
-            <div className="flex-1 bg-gray-900 flex min-h-0">
+            <div className="flex-1 bg-gray-700 flex min-h-0">
               <div className="flex-1 flex flex-col min-h-0">
               {activeServerId && sessionReady[activeServerId] ? (
                 <Terminal
