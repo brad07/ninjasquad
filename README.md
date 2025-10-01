@@ -1,25 +1,32 @@
-# Ninja Squad
+# SensAI
 
-A Tauri-based application for orchestrating multiple OpenCode.ai terminal instances across local and remote machines, enabling coordinated task execution and team collaboration.
+An AI-powered project management and development assistant that integrates Claude Agent, intelligent error monitoring, and project tracking capabilities.
 
-## Architecture Overview
+## Features
 
-Ninja Squad coordinates multiple AI agents working together as a team. The application has three main layers:
+- **Claude Agent Integration**: Multiple AI coding agent sessions with persistent conversation history
+- **SensAI Chat**: Intelligent assistant that monitors development activity and provides contextual recommendations
+- **Ollama Integration**: Local LLM for dev server error monitoring and analysis
+- **Project Management**: Track projects with integrated Linear issue management
+- **Dev Server Monitoring**: Automatic error detection and notification via desktop or Slack
+- **Multi-Session Support**: Run multiple AI agent sessions simultaneously with tabbed interface
+- **Database Persistence**: SQLite-backed storage for sessions, conversations, and project data
+
+## Architecture
 
 ### Backend (Rust/Tauri)
-- **OpenCode Service**: Manages OpenCode server instances, spawning, health checks, and API communication
-- **WezTerm Controller**: Handles terminal multiplexing via WezTerm's SSH domains and CLI
-- **Session Manager**: Coordinates task distribution across multiple OpenCode instances
+- **Claude Agent Service**: Spawns and manages Claude CLI processes for AI coding sessions
+- **Plugin System**: Extensible plugin architecture for different AI agents
+- **Database Layer**: SQLite for persistent storage of sessions and conversations
+- **Slack Integration**: Node.js service for Slack notifications
+- **PTY Manager**: Terminal emulation for embedded terminal views
 
 ### Frontend (React/TypeScript)
-- **Terminal Views**: Real-time display of OpenCode output
-- **Server Cards**: Visual representation of server status and controls
-- **Session Dashboard**: Overview of all active sessions and task distribution
-
-### Communication
-- **OpenCode Server API**: HTTP/REST API with Server-Sent Events for real-time updates
-- **WezTerm Multiplexer**: SSH/TLS connections for remote terminal control
-- **Tauri IPC**: Bridge between Rust backend and React frontend
+- **Plugin Architecture**: Modular plugin system for different AI agents (Claude Agent, Claude Code)
+- **Session Management**: Multi-session support with tabbed interface
+- **Real-time Chat**: Rich chat interface with markdown, code blocks, and artifacts
+- **SensAI Panel**: Contextual AI assistant with auto-approve and notification features
+- **Admin Dashboard**: Configuration for API keys, notifications, and integrations
 
 ## Project Structure
 
@@ -27,16 +34,22 @@ Ninja Squad coordinates multiple AI agents working together as a team. The appli
 ninjasquad/
 ├── src-tauri/              # Rust backend
 │   ├── src/
-│   │   ├── opencode/       # OpenCode service layer
-│   │   ├── wezterm/        # WezTerm controller
-│   │   └── session/        # Session management
-│   └── tests/              # Rust integration tests
+│   │   ├── claude/         # Claude Agent service
+│   │   ├── slack/          # Slack integration
+│   │   ├── plugins/        # Plugin management
+│   │   ├── db/             # Database layer
+│   │   └── pty/            # Terminal emulation
+│   └── scripts/            # Node.js services (Slack, browser launcher)
 ├── src/                    # React frontend
 │   ├── components/         # UI components
+│   │   ├── sensei/         # SensAI chat components
+│   │   ├── plugins/        # Plugin UI components
+│   │   └── shared/         # Shared components
 │   ├── services/           # API services
-│   ├── types/              # TypeScript types
-│   └── test/               # Test setup
-└── tests/                  # E2E tests
+│   ├── plugins/            # Plugin definitions
+│   ├── hooks/              # Custom React hooks
+│   └── types/              # TypeScript types
+└── CLAUDE.md               # Development guidelines
 ```
 
 ## Development Setup
@@ -45,8 +58,8 @@ ninjasquad/
 - Node.js 18+
 - Rust 1.70+
 - Tauri CLI
-- OpenCode.ai installed
-- WezTerm (optional, for terminal display)
+- Claude CLI (for Claude Agent integration)
+- Ollama (optional, for local LLM error monitoring)
 
 ### Installation
 
@@ -55,8 +68,24 @@ ninjasquad/
 npm install
 
 # Run development server
-npm run tauri dev
+npm run tauri:dev
 ```
+
+### Configuration
+
+1. **API Keys**: Configure in Admin → AI Models
+   - Anthropic API key for Claude Agent
+
+2. **Ollama** (optional): Configure in Admin → AI Models
+   - Install Ollama and pull a model (e.g., `llama3.1`)
+   - Set base URL (default: `http://localhost:11434`)
+
+3. **Slack** (optional): Configure in Admin → Notifications
+   - Set up Slack app and get bot token
+   - Configure signing secret
+
+4. **Linear** (optional): Configure in Projects
+   - Get Linear API key and Team ID
 
 ## Testing
 
@@ -90,80 +119,76 @@ cargo test
 - **Integration Tests**: Cross-service interactions
 - **Mock Tests**: Using wiremock for HTTP API testing
 
-## TDD Implementation Status
+## Key Features in Detail
 
-### ✅ Completed
-- [x] Project initialization with Tauri + React + TypeScript
-- [x] Testing framework setup (Vitest + Rust tests)
-- [x] Project structure creation
-- [x] OpenCode service tests (TDD)
-- [x] WezTerm controller tests (TDD)
-- [x] Session manager tests (TDD)
-- [x] Frontend component tests
+### Claude Agent Integration
+- Multiple concurrent sessions with tabbed interface
+- Persistent conversation history stored in SQLite
+- Session management (create, switch, close, rename)
+- Custom configuration per session
 
-### 🚧 In Progress
-- [ ] OpenCode service implementation
-- [ ] WezTerm controller implementation
-- [ ] Session manager implementation
+### SensAI Chat
+- Monitors user activity and project changes
+- Provides contextual recommendations
+- Auto-approve mode for automated execution
+- Desktop and Slack notifications
+- Integration with dev server error monitoring
 
-### 📋 TODO
-- [ ] Event stream handling
-- [ ] Task distribution algorithms
-- [ ] Error recovery mechanisms
-- [ ] Performance optimizations
-- [ ] E2E test suite
-- [ ] Documentation completion
+### Dev Server Monitoring
+- Ollama-powered error detection from terminal output
+- Automatic analysis of build errors and failures
+- Smart filtering (only notifies on actual errors)
+- Sends recommendations to SensAI for resolution
+- Configurable analysis throttling and quiet periods
 
-## API Endpoints
+### Project Management
+- Project tracking with working directories
+- Linear integration for issue management
+- Session association with projects
+- Project-specific configuration
 
-### Tauri Commands
-- `spawn_opencode_server(port)` - Start new OpenCode server
-- `list_opencode_servers()` - Get all active servers
-- `create_wezterm_domain(name, address, username)` - Setup SSH domain
-- `distribute_task(prompt)` - Assign task to available session
+## Database Schema
 
-### OpenCode Server API
-- `GET /health` - Health check endpoint
-- `GET /doc` - OpenAPI specification
-- `POST /tui` - Send prompts to TUI
-- `GET /event` - Server-sent events stream
+SensAI uses SQLite for persistent storage:
 
-## Configuration
+- **plugin_sessions**: AI agent sessions with metadata
+- **conversation_history**: Chat messages and agent responses
+- **projects**: Project information and settings
+- **linear_issues**: Cached Linear issue data
 
-### Remote Server Setup
-1. Install OpenCode on remote server
-2. Install WezTerm on remote server
-3. Configure SSH access with key authentication
-4. Run OpenCode in server mode: `opencode server --port 4096`
+## Plugin System
 
-### Local Configuration
-1. Configure WezTerm domains in the app
-2. Set distribution strategy (RoundRobin, LeastLoaded, Random)
-3. Configure event handlers for real-time updates
+The plugin architecture allows for different AI agents:
 
-## Architecture Benefits
+```typescript
+interface CodingAgentPlugin {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  supportedModels: string[];
+  capabilities: {
+    fileOperations: boolean;
+    terminalAccess: boolean;
+    gitOperations: boolean;
+    webSearch: boolean;
+    codeExecution: boolean;
+  };
+  customRenderer?: React.ComponentType<any>;
+}
+```
 
-1. **Scalability**: Distribute tasks across multiple machines
-2. **Resilience**: Automatic failure recovery and task redistribution
-3. **Performance**: Parallel execution of independent tasks
-4. **Flexibility**: Mix local and remote OpenCode instances
-5. **Monitoring**: Real-time status and progress tracking
+Current plugins:
+- **Claude Agent Direct**: Full Claude Agent integration with rich UI
+- **OpenCode**: Terminal-based coding agent (planned)
 
-## Security Considerations
+## Notifications
 
-- SSH key-based authentication for remote connections
-- TLS encryption for WezTerm multiplexer
-- API authentication for OpenCode server
-- Input sanitization and validation
-- Rate limiting for API calls
+SensAI supports multiple notification channels:
 
-## Performance Targets
-
-- Server spawn: < 2 seconds
-- API response: < 100ms
-- Event latency: < 50ms
-- UI updates: 60 FPS
-- Memory usage: < 50MB per instance
+1. **Desktop Notifications**: Browser-based notifications when app is active
+2. **Slack Notifications**: Fallback when user is away (configurable)
+3. **In-App Notifications**: SensAI panel displays recommendations directly
 
 ## Contributing
 

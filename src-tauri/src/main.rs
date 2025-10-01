@@ -3,7 +3,7 @@
 
 fn main() {
     #[cfg(feature = "tauri-app")]
-    ninjasquad_lib::run();
+    sensai_lib::run();
 
     #[cfg(not(feature = "tauri-app"))]
     panic!("This binary requires the tauri-app feature to be enabled");
