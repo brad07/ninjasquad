@@ -6,12 +6,11 @@ import {
   RectangleGroupIcon,
   QueueListIcon,
   FolderIcon,
-  PaintBrushIcon,
   KeyIcon,
   CheckCircleIcon,
 } from '@heroicons/react/24/solid';
 
-export type MainView = 'dashboard' | 'servers' | 'sessions' | 'tasks' | 'projects' | 'retroui' | 'admin' | 'linear';
+export type MainView = 'dashboard' | 'servers' | 'sessions' | 'tasks' | 'projects' | 'admin' | 'linear';
 
 interface TopNavProps {
   currentView: MainView;
@@ -20,14 +19,13 @@ interface TopNavProps {
 
 const TopNav: React.FC<TopNavProps> = ({ currentView, onViewChange }) => {
   const tabs = [
-    { id: 'projects' as MainView, label: 'Projects', icon: FolderIcon },
-    { id: 'linear' as MainView, label: 'Linear', icon: CheckCircleIcon },
     { id: 'dashboard' as MainView, label: 'Dashboard', icon: HomeIcon },
+    { id: 'projects' as MainView, label: 'Projects', icon: FolderIcon },
+    { id: 'linear' as MainView, label: 'Issues', icon: CheckCircleIcon },
     { id: 'servers' as MainView, label: 'Servers', icon: ServerIcon },
     { id: 'sessions' as MainView, label: 'Sessions', icon: RectangleGroupIcon },
     { id: 'tasks' as MainView, label: 'Tasks', icon: QueueListIcon },
     { id: 'admin' as MainView, label: 'Admin', icon: KeyIcon },
-    { id: 'retroui' as MainView, label: 'RetroUI', icon: PaintBrushIcon },
   ];
 
   return (

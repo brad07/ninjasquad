@@ -49,9 +49,21 @@ impl SlackService {
             let _ = child.kill();
         }
 
-        // Get the path to the slack-service.js script
+        // Port cleanup: kill any existing process using this port
+        let port = self.port;
+        tokio::spawn(async move {
+            let _ = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("lsof -ti:{} | xargs kill -9 2>/dev/null || true", port))
+                .output()
+                .await;
+            println!("[Slack] Port cleanup completed for {}", port);
+        });
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Get the path to the slack-service.ts script
         // Working directory is typically src-tauri, so use relative path from there
-        let resource_path = std::path::PathBuf::from("scripts/slack-service.js");
+        let resource_path = std::path::PathBuf::from("scripts/slack-service.ts");
 
         // Check if the script exists
         if !resource_path.exists() {
@@ -62,22 +74,79 @@ impl SlackService {
             ));
         }
 
-        // Start the Node.js Slack service
-        let mut cmd = Command::new("node");
-        cmd.arg(&resource_path)
+        // Start the Node.js Slack service using tsx (TypeScript runner)
+        // Use inherit for stdio so we can see output in the terminal
+        let mut cmd = Command::new("npx");
+        cmd.arg("tsx")
+            .arg(&resource_path)
             .env("SLACK_SERVICE_PORT", self.port.to_string())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stdout(std::process::Stdio::inherit())
+            .stderr(std::process::Stdio::inherit());
 
-        let child = cmd.spawn()
+        let mut child = cmd.spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn Slack service: {} (script path: {:?})", e, resource_path))?;
+
+        println!("[Slack] Service process spawned with PID: {:?}", child.id());
+
+        // Check if process started successfully
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                println!("[Slack] Service failed to start. Exit status: {:?}", status);
+                return Err(anyhow::anyhow!("Slack service exited immediately with status {:?}", status));
+            }
+            Ok(None) => {
+                println!("[Slack] Service process is running after startup check");
+            }
+            Err(e) => {
+                println!("[Slack] Error checking process: {}", e);
+            }
+        }
 
         *process_guard = Some(child);
 
-        println!("Slack service started on port {}", self.port);
+        println!("[Slack] Slack service started on port {}", self.port);
 
-        // Wait for service to be ready
-        tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+        // Wait longer for TypeScript service to fully start (tsx needs time to compile)
+        println!("[Slack] Waiting for service to initialize...");
+        tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+
+        // Final check that process is still running
+        let mut final_guard = self.process.lock().await;
+        if let Some(ref mut child) = *final_guard {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    println!("[Slack] WARNING: Service exited during startup with status: {:?}", status);
+                    *final_guard = None;
+                    return Err(anyhow::anyhow!("Slack service crashed during startup with status {:?}", status));
+                }
+                Ok(None) => {
+                    println!("[Slack] Process check: Service is still running");
+                }
+                Err(e) => {
+                    println!("[Slack] Error in final check: {}", e);
+                }
+            }
+        }
+        drop(final_guard);
+
+        // Try to verify the HTTP server is responding
+        let url = format!("http://localhost:{}/status", self.port);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(2000))
+            .build()
+            .unwrap();
+
+        println!("[Slack] Attempting to verify service at {}", url);
+        match client.get(&url).send().await {
+            Ok(response) => {
+                println!("[Slack] ✓ Service is responding! Status code: {}", response.status());
+            }
+            Err(e) => {
+                println!("[Slack] ⚠ Service process is running but HTTP server not responding yet: {}", e);
+                println!("[Slack] This may be normal - the service might need more time to start");
+            }
+        }
 
         Ok(())
     }
@@ -163,21 +232,104 @@ impl SlackService {
         Ok(())
     }
 
-    pub async fn status(&self) -> Result<serde_json::Value> {
-        let url = format!("http://localhost:{}/status", self.port);
+    pub async fn get_approvals(&self, since: u64) -> Result<serde_json::Value> {
+        let url = format!("http://localhost:{}/approvals?since={}", self.port, since);
         let client = reqwest::Client::new();
 
         let response = client
             .get(&url)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get status: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to get approvals: {}", e))?;
 
-        let status = response
+        let approvals = response
             .json()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to parse status: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse approvals: {}", e))?;
 
-        Ok(status)
+        Ok(approvals)
+    }
+
+    pub async fn is_process_running(&self) -> bool {
+        let mut process_guard = self.process.lock().await;
+
+        if let Some(child) = process_guard.as_mut() {
+            // Try to check if the process is still alive
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // Process has exited
+                    println!("[Slack] Process has exited with status: {:?}", status);
+                    *process_guard = None;
+                    false
+                }
+                Ok(None) => {
+                    // Process is still running
+                    true
+                }
+                Err(e) => {
+                    println!("[Slack] Error checking process status: {}", e);
+                    // Assume not running if we can't check
+                    *process_guard = None;
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    pub async fn status(&self) -> Result<serde_json::Value> {
+        println!("[Slack Health Check] Starting status check...");
+
+        // First check if process is running
+        let process_running = self.is_process_running().await;
+        println!("[Slack Health Check] Process in memory: {}", process_running);
+
+        if !process_running {
+            println!("[Slack Health Check] No process found, returning offline status");
+            return Ok(serde_json::json!({
+                "initialized": false,
+                "service_running": false,
+                "port": self.port
+            }));
+        }
+
+        // Try to get status from the service
+        let url = format!("http://localhost:{}/status", self.port);
+        println!("[Slack Health Check] Attempting HTTP request to {}", url);
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(1000))
+            .build()
+            .unwrap();
+
+        match client.get(&url).send().await {
+            Ok(response) => {
+                println!("[Slack Health Check] HTTP request succeeded, status code: {}", response.status());
+                match response.json().await {
+                    Ok(status) => {
+                        println!("[Slack Health Check] Successfully parsed JSON status: {:?}", status);
+                        Ok(status)
+                    },
+                    Err(e) => {
+                        println!("[Slack Health Check] Failed to parse JSON: {}", e);
+                        Ok(serde_json::json!({
+                            "initialized": false,
+                            "service_running": true,
+                            "port": self.port
+                        }))
+                    }
+                }
+            },
+            Err(e) => {
+                println!("[Slack Health Check] HTTP request failed: {}", e);
+                // Service not responding, but process exists
+                Ok(serde_json::json!({
+                    "initialized": false,
+                    "service_running": false,
+                    "port": self.port
+                }))
+            }
+        }
     }
 }

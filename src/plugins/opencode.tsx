@@ -8,6 +8,7 @@ export const OpenCodePlugin: CodingAgentPlugin = {
   description: 'OpenCode AI coding assistant with tmux interface',
   author: 'OpenCode Team',
   icon: '/icons/opencode.svg',
+  enabled: false, // Hidden from plugin selector
   supportedModels: [
     'claude-sonnet-4-0',
     'gpt-4',

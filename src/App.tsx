@@ -13,9 +13,10 @@ import LinearPage from './components/LinearPage';
 import TopNav, { type MainView } from './components/TopNav';
 import ModeToggle, { type ServerMode } from './components/ModeToggle';
 import Terminal from './components/Terminal';
-import RetroUIShowcase from './components/RetroUIShowcase';
 import { opencodeSDKService } from './services/OpenCodeSDKService';
 import { projectsService } from './services/ProjectsService';
+import { apiKeyService } from './services/ApiKeyService';
+import { claudeAgentService } from './services/ClaudeAgentService';
 import type { OpenCodeServer, OrchestratorSession } from './types';
 import type { Project } from './types/project';
 import { FolderOpen, Plus } from 'lucide-react';
@@ -28,7 +29,7 @@ interface TerminalTab {
 }
 
 function App() {
-  const [currentView, setCurrentView] = useState<MainView>('projects');
+  const [currentView, setCurrentView] = useState<MainView>('dashboard');
   const [servers, setServers] = useState<OpenCodeServer[]>([]);
   const [sessions, setSessions] = useState<OrchestratorSession[]>([]);
   // Default to SDK mode since we're only using that now
@@ -92,62 +93,64 @@ function App() {
     }
   };
 
-  // Initialize Slack service on app start if configured
-  const initializeSlack = async () => {
-    // Check if already initialized
-    if ((window as any).slackInitialized) {
-      console.log('Slack already initialized');
-      return;
-    }
-
-    try {
-      // Import dynamically to avoid circular dependencies
-      const { slackService } = await import('./services/SlackService');
-      const { apiKeyService } = await import('./services/ApiKeyService');
-
-      // Check if Slack credentials and channel are configured
-      const botToken = apiKeyService.getKey('slack-bot-token');
-      const signingSecret = apiKeyService.getKey('slack-signing-secret');
-      const appToken = apiKeyService.getKey('slack-app-token');
-      const channel = localStorage.getItem('slack-channel');
-
-      if (botToken && signingSecret && appToken && channel) {
-        console.log('🔧 Auto-connecting to Slack (credentials found)...');
-
-        // Set enabled to true automatically
-        localStorage.setItem('slack-enabled', 'true');
-
-        const success = await slackService.initialize({
-          botToken,
-          signingSecret,
-          appToken,
-          channel,
-          enabled: true
-        });
-
-        if (success) {
-          console.log('✅ Slack auto-connected successfully');
-          (window as any).slackInitialized = true;
-        } else {
-          console.log('⚠️ Slack failed to connect');
-        }
-      } else {
-        console.log('⏭️ Slack credentials not configured, skipping auto-connect');
-      }
-    } catch (error) {
-      console.error('Failed to auto-connect to Slack:', error);
-    }
-  };
-
   // Make loadSessions available globally and initialize plugins
   useEffect(() => {
     (window as any).loadSessions = loadSessions;
     // Initialize plugins
     initializePlugins();
-    // Initialize Slack service if configured
-    initializeSlack();
     // Load sessions initially
     loadSessions();
+  }, []);
+
+  // Initialize Claude Agent service with stored API key on app startup
+  useEffect(() => {
+    console.log('[App] Claude Agent auto-init useEffect triggered');
+
+    const initializeClaudeAgent = async () => {
+      console.log('[App] Waiting 6 seconds for services to fully start...');
+      // Wait for services to start (increased from 4s to ensure full readiness)
+      await new Promise(resolve => setTimeout(resolve, 6000));
+
+      // Add health check retry loop to ensure service is ready
+      console.log('[App] Checking service health...');
+      let healthRetries = 0;
+      const maxRetries = 5;
+      while (healthRetries < maxRetries) {
+        try {
+          await claudeAgentService.healthCheck();
+          console.log('[App] ✓ Service is healthy, proceeding with initialization');
+          break;
+        } catch (error) {
+          healthRetries++;
+          console.log(`[App] Health check failed (attempt ${healthRetries}/${maxRetries}), retrying...`);
+          if (healthRetries < maxRetries) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          } else {
+            console.error('[App] ✗ Service health check failed after max retries, aborting auto-initialization');
+            return;
+          }
+        }
+      }
+
+      console.log('[App] Checking for Anthropic API key...');
+      // Get stored API key
+      const apiKey = apiKeyService.getKey('anthropic');
+      console.log('[App] API key found:', apiKey ? 'YES (length: ' + apiKey.length + ')' : 'NO');
+
+      if (apiKey) {
+        try {
+          console.log('[App] Calling claudeAgentService.initialize()...');
+          await claudeAgentService.initialize(apiKey);
+          console.log('[App] ✓ Claude Agent service auto-initialized with stored API key');
+        } catch (error) {
+          console.error('[App] ✗ Failed to auto-initialize Claude Agent service:', error);
+        }
+      } else {
+        console.log('[App] No Anthropic API key found - Claude Agent service not initialized');
+      }
+    };
+
+    initializeClaudeAgent();
   }, []);
 
   // Function to open a terminal for a server
@@ -201,8 +204,24 @@ function App() {
       if (exists) {
         const existing = await projectsService.getProjectByPath(newProjectPath);
         if (existing) {
-          alert('A project already exists at this location.');
-          return;
+          const shouldDelete = confirm(
+            `A project named "${existing.name}" already exists at this location.\n\n` +
+            `Do you want to delete it and create a new one?\n\n` +
+            `Click OK to delete and continue, or Cancel to open the existing project.`
+          );
+
+          if (shouldDelete) {
+            await projectsService.deleteProject(existing.id);
+          } else {
+            // User wants to keep it - open the existing project
+            setSelectedProject(existing);
+            setShowNewProjectDialog(false);
+            setNewProjectName('');
+            setNewProjectPath('');
+            setNewProjectDescription('');
+            setSelectedColor('#3b82f6');
+            return;
+          }
         }
       }
 
@@ -245,6 +264,26 @@ function App() {
     switch (currentView) {
       case 'dashboard':
         return <Dashboard servers={servers} sessions={sessions} />;
+      case 'projects':
+        // Show empty state when no project is selected
+        return (
+          <div className="flex items-center justify-center h-full bg-stone-50">
+            <div className="text-center">
+              <div className="mb-4">
+                <FolderOpen className="w-24 h-24 mx-auto text-gray-400" strokeWidth={1.5} />
+              </div>
+              <h2 className="text-2xl font-bold text-gray-800 mb-2">No Project Selected</h2>
+              <p className="text-gray-600 mb-6">Select or Create a Project to get started</p>
+              <button
+                onClick={() => setShowNewProjectDialog(true)}
+                className="px-6 py-3 bg-gradient-to-br from-green-400 to-green-500 hover:from-green-300 hover:to-green-400 text-black font-bold border-4 border-black rounded-lg shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] hover:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] transition-all flex items-center gap-2 mx-auto"
+              >
+                <Plus className="w-5 h-5" />
+                Create New Project
+              </button>
+            </div>
+          </div>
+        );
       case 'linear':
         return <LinearPage />;
       case 'servers':
@@ -259,8 +298,6 @@ function App() {
         return <TaskDistribution sessions={sessions} serverMode={serverMode} />;
       case 'admin':
         return <AdminPage />;
-      case 'retroui':
-        return <RetroUIShowcase />;
       default:
         return <Dashboard servers={servers} sessions={sessions} />;
     }

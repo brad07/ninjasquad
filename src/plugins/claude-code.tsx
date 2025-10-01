@@ -9,6 +9,7 @@ export const ClaudeCodePlugin: CodingAgentPlugin = {
   author: 'Anthropic Integration',
   icon: '/icons/claude.svg',
   supportedModels: [
+    'claude-sonnet-4-5-20250929',
     'claude-sonnet-4-20250514',
     'claude-3-5-sonnet-20241022',
     'claude-3-5-haiku-20241022',
@@ -16,7 +17,7 @@ export const ClaudeCodePlugin: CodingAgentPlugin = {
     'claude-3-sonnet-20240229',
     'claude-3-haiku-20240307'
   ],
-  defaultModel: 'claude-sonnet-4-20250514',
+  defaultModel: 'claude-sonnet-4-5-20250929',
   requiresApiKey: false, // Claude Code handles its own authentication
   uiComponent: 'custom',
   capabilities: {

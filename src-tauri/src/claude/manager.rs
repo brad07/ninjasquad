@@ -30,9 +30,25 @@ impl ClaudeProcessManager {
         working_directory: Option<String>,
         model: Option<String>,
     ) -> Result<String, String> {
-        let session_id = format!("claude-session-{}", Uuid::new_v4());
+        // Check if a session for this project already exists
+        let existing_session = {
+            let processes = self.processes.read().await;
+            processes.iter()
+                .find(|(_, p)| p.session.project_id == project_id)
+                .map(|(id, _)| id.clone())
+        };
+
+        if let Some(session_id) = existing_session {
+            println!("[ClaudeManager] Reusing existing session for project {}: {}", project_id, session_id);
+            return Ok(session_id);
+        }
+
+        // Generate a UUID for Claude CLI session ID
+        let uuid = Uuid::new_v4();
+        let session_id = format!("claude-session-{}", uuid);
 
         println!("[ClaudeManager] Creating new session: {}", session_id);
+        println!("[ClaudeManager] Claude UUID: {}", uuid);
         println!("[ClaudeManager] Working directory: {:?}", working_directory);
         println!("[ClaudeManager] Model: {:?}", model);
 
@@ -47,20 +63,13 @@ impl ClaudeProcessManager {
             last_used: Utc::now().to_rfc3339(),
         };
 
-        // Create a session file for --resume functionality
-        let session_dir = dirs::cache_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("ninja-squad-claude-sessions");
-
-        fs::create_dir_all(&session_dir)
-            .map_err(|e| format!("Failed to create session directory: {}", e))?;
-
-        let session_file = session_dir.join(format!("{}.session", session_id));
+        // Store the UUID for use with --session-id flag
+        let session_uuid = uuid.to_string();
 
         // Store the process info
         let process = ClaudeProcess {
             session: session.clone(),
-            session_file: Some(session_file),
+            session_file: Some(PathBuf::from(session_uuid)),  // Store UUID as "file" path for now
         };
 
         self.processes.write().await.insert(session_id.clone(), process);
@@ -80,12 +89,15 @@ impl ClaudeProcessManager {
         let process = processes.get(session_id)
             .ok_or_else(|| format!("Session {} not found", session_id))?;
 
-        // Build the Claude command with --print for one-shot response
+        // Build the Claude command - use --continue to maintain conversation context
         let mut cmd = Command::new("claude");
         cmd.arg("--print");
 
-        // Don't use --continue or --resume for now as they may cause issues
-        // Each message is independent
+        // Use --continue to resume the most recent conversation
+        // This is simpler than managing session IDs and avoids "already in use" errors
+        cmd.arg("--continue");
+
+        println!("[ClaudeManager] Using --continue for conversation history");
 
         // Set working directory if specified
         if let Some(dir) = &process.session.working_directory {
@@ -125,12 +137,12 @@ impl ClaudeProcessManager {
             drop(stdin);  // Close stdin
         }
 
-        // Wait for the process with timeout
+        // Wait for the process with timeout (2 minutes for longer responses)
         let output = tokio::time::timeout(
-            tokio::time::Duration::from_secs(60),
+            tokio::time::Duration::from_secs(120),
             child.wait_with_output()
         ).await
-            .map_err(|_| "Claude command timed out after 60 seconds".to_string())?
+            .map_err(|_| "Claude command timed out after 120 seconds".to_string())?
             .map_err(|e| format!("Failed to read Claude output: {}", e))?;
 
         if !output.status.success() {
@@ -145,12 +157,7 @@ impl ClaudeProcessManager {
             return Err("No response received from Claude".to_string());
         }
 
-        // Update session file if we have one
-        if let Some(session_file) = &process.session_file {
-            // The session is automatically saved by Claude when using --resume
-            println!("[ClaudeManager] Session saved to: {:?}", session_file);
-        }
-
+        // Session is automatically maintained by Claude CLI using --session-id
         println!("[ClaudeManager] Received response: {} chars", response.len());
         Ok(response)
     }
@@ -186,6 +193,20 @@ impl ClaudeProcessManager {
         let processes = self.processes.read().await;
         processes.get(session_id)
             .map(|p| p.session.clone())
+    }
+
+    pub async fn update_session_model(&self, session_id: &str, model: String) -> Result<(), String> {
+        println!("[ClaudeManager] Updating session {} model to: {}", session_id, model);
+
+        let mut processes = self.processes.write().await;
+
+        if let Some(process) = processes.get_mut(session_id) {
+            process.session.model = Some(model.clone());
+            println!("[ClaudeManager] Session {} model updated to: {}", session_id, model);
+            Ok(())
+        } else {
+            Err(format!("Session {} not found", session_id))
+        }
     }
 
     pub async fn cleanup_inactive_sessions(&self) {

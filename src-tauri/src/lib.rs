@@ -20,11 +20,11 @@ mod tauri_app {
     use crate::database::DatabaseManager;
     use crate::queue::{QueueClient, WorkerService, QueueConfig, WorkerInfo, TaskMessage, TaskType, TaskResult, LocalTestMode};
     use crate::plugins::manager::PluginManager;
-    use crate::claude::{ClaudeProcessManager, ClaudeSession};
+    use crate::claude::{ClaudeProcessManager, ClaudeSession, ClaudeAgentService};
     use crate::slack::{SlackService, SlackConfig, SlackApprovalRequest, SlackMessage};
     use std::sync::{Arc, Mutex};
     use tokio::sync::Mutex as AsyncMutex;
-    use tauri::{Manager, State};
+    use tauri::{Manager, State, Emitter};
 
     struct AppState {
         opencode_service: Arc<OpenCodeService>,
@@ -39,6 +39,7 @@ mod tauri_app {
         local_test_mode: Arc<AsyncMutex<Option<LocalTestMode>>>,
         plugin_manager: Arc<AsyncMutex<PluginManager>>,
         slack_service: Arc<SlackService>,
+        claude_agent_service: Arc<ClaudeAgentService>,
     }
 
     #[tauri::command]
@@ -512,6 +513,274 @@ mod tauri_app {
         Ok(tmux_manager.list_sessions().await)
     }
 
+    // Git Commands
+    #[tauri::command]
+    async fn get_git_diff(
+        file_path: Option<String>,
+        working_dir: String,
+    ) -> Result<String, String> {
+        use std::process::Command;
+
+        let mut cmd = Command::new("git");
+        cmd.arg("diff");
+
+        // Add specific file if provided
+        if let Some(path) = file_path {
+            cmd.arg("--").arg(path);
+        }
+
+        // Set working directory
+        cmd.current_dir(&working_dir);
+
+        // Execute git diff
+        let output = cmd.output()
+            .map_err(|e| format!("Failed to execute git diff: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Git diff failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.to_string())
+    }
+
+    #[tauri::command]
+    async fn get_git_changed_files(
+        working_dir: String,
+    ) -> Result<Vec<String>, String> {
+        use std::process::Command;
+
+        let mut cmd = Command::new("git");
+        cmd.args(&["diff", "--name-only"]);
+        cmd.current_dir(&working_dir);
+
+        let output = cmd.output()
+            .map_err(|e| format!("Failed to execute git diff: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Git diff failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let files: Vec<String> = stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.to_string())
+            .collect();
+
+        Ok(files)
+    }
+
+    // Browser Automation
+    #[tauri::command]
+    async fn open_browser(url: String) -> Result<(), String> {
+        use std::process::Command;
+
+        // Get the path to the browser script
+        let resource_path = std::path::PathBuf::from("scripts/browser-launcher.ts");
+
+        if !resource_path.exists() {
+            return Err(format!(
+                "Browser launcher script not found at {:?}",
+                resource_path
+            ));
+        }
+
+        // Launch browser using npx tsx
+        Command::new("npx")
+            .arg("tsx")
+            .arg(&resource_path)
+            .arg(&url)
+            .spawn()
+            .map_err(|e| format!("Failed to launch browser: {}", e))?;
+
+        Ok(())
+    }
+
+    #[tauri::command]
+    async fn launch_playwright_browser(url: String, headless: bool) -> Result<(), String> {
+        use std::process::Command;
+
+        // Get the path to the browser script
+        let resource_path = std::path::PathBuf::from("scripts/browser-launcher.ts");
+
+        if !resource_path.exists() {
+            return Err(format!(
+                "Browser launcher script not found at {:?}",
+                resource_path
+            ));
+        }
+
+        // Launch browser using npx tsx with headless parameter
+        Command::new("npx")
+            .arg("tsx")
+            .arg(&resource_path)
+            .arg(&url)
+            .arg(headless.to_string())
+            .spawn()
+            .map_err(|e| format!("Failed to launch Playwright browser: {}", e))?;
+
+        Ok(())
+    }
+
+    // Dev Server Process Management
+    #[tauri::command]
+    async fn spawn_dev_server(
+        command: String,
+        working_dir: String,
+        app_handle: tauri::AppHandle,
+    ) -> Result<u32, String> {
+        use std::process::{Command, Stdio};
+
+        // Spawn the process in the background with piped stdout/stderr
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(&command)
+            .current_dir(&working_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn dev server: {}", e))?;
+
+        let pid = child.id();
+
+        // Stream stdout in a background task
+        if let Some(stdout) = child.stdout.take() {
+            use std::io::{BufRead, BufReader};
+            let app_handle_clone = app_handle.clone();
+            tokio::spawn(async move {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    if let Ok(line) = line {
+                        let _ = app_handle_clone.emit("dev-server-output", line);
+                    }
+                }
+            });
+        }
+
+        // Stream stderr in a background task
+        if let Some(stderr) = child.stderr.take() {
+            use std::io::{BufRead, BufReader};
+            let app_handle_clone = app_handle.clone();
+            tokio::spawn(async move {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines() {
+                    if let Ok(line) = line {
+                        let _ = app_handle_clone.emit("dev-server-error", line);
+                    }
+                }
+            });
+        }
+
+        // Wait for process to exit in background
+        tokio::spawn(async move {
+            let _ = child.wait();
+        });
+
+        Ok(pid)
+    }
+
+    // Dev Server Terminal Spawning (legacy - opens external terminal)
+    #[tauri::command]
+    async fn spawn_external_terminal(
+        command: String,
+        working_dir: String,
+        title: String,
+    ) -> Result<u32, String> {
+        use std::process::Command;
+
+        #[cfg(target_os = "macos")]
+        {
+            // Use osascript to spawn Terminal.app with the command
+            // Escape single quotes and backslashes for AppleScript
+            let escaped_dir = working_dir.replace("\\", "\\\\").replace("'", "\\'");
+            let escaped_title = title.replace("\\", "\\\\").replace("'", "\\'");
+            let escaped_command = command.replace("\\", "\\\\").replace("'", "\\'");
+
+            let script = format!(
+                r#"tell application "Terminal"
+    activate
+    do script "cd '{}' && printf '\\033]0;{}\\007' && {}"
+end tell"#,
+                escaped_dir, escaped_title, escaped_command
+            );
+
+            let output = Command::new("osascript")
+                .arg("-e")
+                .arg(&script)
+                .output()
+                .map_err(|e| format!("Failed to spawn terminal: {}", e))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("Failed to execute terminal command: {}", stderr));
+            }
+
+            // Terminal.app doesn't easily give us the PID, so return 0 as a placeholder
+            Ok(0)
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Try common Linux terminal emulators
+            let terminals = vec![
+                ("gnome-terminal", vec!["--working-directory", &working_dir, "--title", &title, "--", "bash", "-c", &command]),
+                ("konsole", vec!["--workdir", &working_dir, "-p", &format!("tabtitle={}", title), "-e", "bash", "-c", &command]),
+                ("xterm", vec!["-T", &title, "-e", &format!("cd {:?} && {}", working_dir, command)]),
+            ];
+
+            for (terminal, args) in terminals {
+                if let Ok(mut child) = Command::new(terminal)
+                    .args(&args)
+                    .spawn()
+                {
+                    return Ok(child.id());
+                }
+            }
+
+            Err("No compatible terminal emulator found".to_string())
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            // Use Windows Terminal or fallback to cmd
+            let result = Command::new("wt")
+                .arg("-d")
+                .arg(&working_dir)
+                .arg("--title")
+                .arg(&title)
+                .arg("cmd")
+                .arg("/k")
+                .arg(&command)
+                .spawn();
+
+            match result {
+                Ok(mut child) => Ok(child.id()),
+                Err(_) => {
+                    // Fallback to cmd
+                    let mut child = Command::new("cmd")
+                        .arg("/c")
+                        .arg("start")
+                        .arg(&title)
+                        .arg("cmd")
+                        .arg("/k")
+                        .arg(&format!("cd /d {} && {}", working_dir, command))
+                        .spawn()
+                        .map_err(|e| format!("Failed to spawn terminal: {}", e))?;
+
+                    Ok(child.id())
+                }
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            Err("Unsupported operating system".to_string())
+        }
+    }
+
     // Slack Commands
     #[tauri::command]
     async fn start_slack_service(
@@ -570,6 +839,59 @@ mod tauri_app {
         state: State<'_, AppState>,
     ) -> Result<serde_json::Value, String> {
         state.slack_service.status().await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn get_slack_approvals(
+        state: State<'_, AppState>,
+        since: u64,
+    ) -> Result<serde_json::Value, String> {
+        state.slack_service.get_approvals(since).await
+            .map_err(|e| e.to_string())
+    }
+
+    // Claude Agent Service commands
+    #[tauri::command]
+    async fn start_claude_agent_service(
+        app: tauri::AppHandle,
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        state.claude_agent_service.start(&app).await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn stop_claude_agent_service(
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        state.claude_agent_service.stop().await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn initialize_claude_agent(
+        api_key: String,
+        model: Option<String>,
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        state.claude_agent_service.initialize(api_key, model).await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn get_claude_agent_health(
+        state: State<'_, AppState>,
+    ) -> Result<serde_json::Value, String> {
+        state.claude_agent_service.health_check().await
+            .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn shutdown_claude_agent(
+        state: State<'_, AppState>,
+    ) -> Result<(), String> {
+        state.claude_agent_service.shutdown().await
             .map_err(|e| e.to_string())
     }
 
@@ -724,6 +1046,16 @@ mod tauri_app {
         Ok(state.claude_manager.get_session(&session_id).await)
     }
 
+    #[tauri::command]
+    async fn claude_update_session_model(
+        state: State<'_, AppState>,
+        session_id: String,
+        model: String
+    ) -> Result<(), String> {
+        println!("[claude_update_session_model] Updating session {} to model: {}", session_id, model);
+        state.claude_manager.update_session_model(&session_id, model).await
+    }
+
     // Legacy execute_claude_code - now uses session manager internally
     #[tauri::command]
     async fn execute_claude_code(
@@ -779,6 +1111,7 @@ mod tauri_app {
         let plugin_manager = Arc::new(AsyncMutex::new(PluginManager::new()));
         let claude_manager = Arc::new(ClaudeProcessManager::new());
         let slack_service = Arc::new(SlackService::new(3456));
+        let claude_agent_service = Arc::new(ClaudeAgentService::new(3457));
 
         // Initialize plugins will be done after app setup when we have an async runtime
 
@@ -795,11 +1128,14 @@ mod tauri_app {
             local_test_mode: Arc::new(AsyncMutex::new(None)),
             plugin_manager,
             slack_service,
+            claude_agent_service,
         };
 
         tauri::Builder::default()
             .plugin(tauri_plugin_opener::init())
             .plugin(tauri_plugin_dialog::init())
+            .plugin(tauri_plugin_notification::init())
+            .plugin(tauri_plugin_fs::init())
             .invoke_handler(tauri::generate_handler![
                 spawn_opencode_server,
                 spawn_opencode_sdk_server,
@@ -850,6 +1186,12 @@ mod tauri_app {
                 send_tmux_command,
                 capture_tmux_pane,
                 list_tmux_sessions,
+                get_git_diff,
+                get_git_changed_files,
+                open_browser,
+                launch_playwright_browser,
+                spawn_dev_server,
+                spawn_external_terminal,
                 start_slack_service,
                 stop_slack_service,
                 initialize_slack,
@@ -857,6 +1199,9 @@ mod tauri_app {
                 send_slack_message,
                 shutdown_slack,
                 get_slack_status,
+                get_slack_approvals,
+                initialize_claude_agent,
+                get_claude_agent_health,
                 initialize_plugins,
                 list_plugins,
                 get_active_plugin,
@@ -868,7 +1213,13 @@ mod tauri_app {
                 claude_close_session,
                 claude_list_sessions,
                 claude_get_session,
+                claude_update_session_model,
                 test_claude_ping,
+                start_claude_agent_service,
+                stop_claude_agent_service,
+                initialize_claude_agent,
+                get_claude_agent_health,
+                shutdown_claude_agent,
                 update_linear_config,
                 assign_issue_to_agent,
                 execute_agent_task,
@@ -912,9 +1263,64 @@ mod tauri_app {
                     });
                 }
 
+                // Start infrastructure services
+                {
+                    let handle = app.handle().clone();
+                    let state: State<AppState> = handle.state();
+
+                    // Start Slack service
+                    let slack_service = state.slack_service.clone();
+                    let handle_slack = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = slack_service.start(&handle_slack).await {
+                            eprintln!("Failed to start Slack service: {}", e);
+                        }
+                    });
+
+                    // Start Claude Agent service
+                    let claude_agent_service = state.claude_agent_service.clone();
+                    let handle_claude = handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = claude_agent_service.start(&handle_claude).await {
+                            eprintln!("Failed to start Claude Agent service: {}", e);
+                        }
+                    });
+                }
+
                 if let Some(window) = app.get_webview_window("main") {
                     // Maximize the window on launch
                     let _ = window.maximize();
+
+                    // Set up cleanup on window close
+                    let handle = app.handle().clone();
+                    window.on_window_event(move |event| {
+                        if let tauri::WindowEvent::CloseRequested { .. } = event {
+                            println!("Application closing, cleaning up services...");
+                            let state: State<AppState> = handle.state();
+
+                            // Stop Slack service
+                            let slack_service = state.slack_service.clone();
+                            tauri::async_runtime::block_on(async move {
+                                if let Err(e) = slack_service.shutdown().await {
+                                    eprintln!("Failed to shutdown Slack service: {}", e);
+                                } else {
+                                    println!("Slack service stopped successfully");
+                                }
+                            });
+
+                            // Stop Claude Agent service
+                            let claude_agent_service = state.claude_agent_service.clone();
+                            tauri::async_runtime::block_on(async move {
+                                if let Err(e) = claude_agent_service.shutdown().await {
+                                    eprintln!("Failed to shutdown Claude Agent service: {}", e);
+                                } else {
+                                    println!("Claude Agent service stopped successfully");
+                                }
+                            });
+
+                            println!("Services cleanup completed");
+                        }
+                    });
                 }
 
                 Ok(())

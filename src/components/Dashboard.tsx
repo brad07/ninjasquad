@@ -1,14 +1,99 @@
-import React from 'react';
-import { Server, Cpu, CheckCircle, XCircle, Activity, Zap, Database, Wifi, Bot } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Server, Cpu, CheckCircle, XCircle, Activity, Zap, Database, Wifi, Bot, MessageSquare } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import ClaudeIcon from './icons/ClaudeIcon';
 import type { OpenCodeServer, OrchestratorSession } from '../types';
+import { apiKeyService } from '../services/ApiKeyService';
 
 interface DashboardProps {
   servers: OpenCodeServer[];
   sessions: OrchestratorSession[];
 }
 
+interface SlackStatus {
+  initialized: boolean;
+  service_running: boolean;
+  port?: number;
+  connected_channels?: number;
+}
+
+interface ClaudeAgentStatus {
+  configured: boolean;
+  sessions?: number;
+}
+
 const Dashboard: React.FC<DashboardProps> = ({ servers, sessions }) => {
+  const [slackStatus, setSlackStatus] = useState<SlackStatus>({ initialized: false, service_running: false });
+  const [claudeAgentStatus, setClaudeAgentStatus] = useState<ClaudeAgentStatus>({ configured: false });
+  const [loadingSlack, setLoadingSlack] = useState(true);
+  const [slackActionLoading, setSlackActionLoading] = useState(false);
+
+  useEffect(() => {
+    loadServiceStatuses();
+    // Refresh status every 5 seconds
+    const interval = setInterval(loadServiceStatuses, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const loadServiceStatuses = async () => {
+    // Load Slack status - call service directly instead of through Rust
+    try {
+      const response = await fetch('http://localhost:3456/status');
+      if (response.ok) {
+        const status = await response.json();
+        setSlackStatus({
+          initialized: status.initialized || false,
+          service_running: status.service_running || false,
+          port: status.port || 3456,
+          connected_channels: status.connected_channels || 0
+        });
+      } else {
+        setSlackStatus({ initialized: false, service_running: false });
+      }
+    } catch (error) {
+      // Slack service not running - this is expected if not configured
+      setSlackStatus({ initialized: false, service_running: false });
+    } finally {
+      setLoadingSlack(false);
+    }
+
+    // Claude Agent status - check if API key is configured
+    const apiKey = apiKeyService.getKey('anthropic');
+    setClaudeAgentStatus({
+      configured: !!apiKey,
+      sessions: 0 // Would need to track this if needed
+    });
+  };
+
+  const handleStartSlack = async () => {
+    setSlackActionLoading(true);
+    try {
+      await invoke('start_slack_service');
+      // Wait a bit for service to start
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      await loadServiceStatuses();
+    } catch (error) {
+      console.error('Failed to start Slack service:', error);
+      alert('Failed to start Slack service: ' + (error as any).toString());
+    } finally {
+      setSlackActionLoading(false);
+    }
+  };
+
+  const handleStopSlack = async () => {
+    setSlackActionLoading(true);
+    try {
+      await invoke('stop_slack_service');
+      // Wait a bit for service to stop
+      await new Promise(resolve => setTimeout(resolve, 500));
+      await loadServiceStatuses();
+    } catch (error) {
+      console.error('Failed to stop Slack service:', error);
+      alert('Failed to stop Slack service: ' + (error as any).toString());
+    } finally {
+      setSlackActionLoading(false);
+    }
+  };
   const runningServers = servers.filter(s => s.status === 'Running').length;
   const activeSessions = sessions.filter(s => s.status === 'Working').length;
   const idleSessions = sessions.filter(s => s.status === 'Idle').length;
@@ -64,214 +149,15 @@ const Dashboard: React.FC<DashboardProps> = ({ servers, sessions }) => {
         </div>
       </div>
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-        {stats.map((stat) => (
-          <div
-            key={stat.label}
-            className={`${stat.bgColor} border-4 border-black rounded-lg p-6 shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] hover:translate-x-1 hover:translate-y-1 hover:shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] transition-all`}
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-bold text-black uppercase tracking-wider">{stat.label}</p>
-                <p className="text-4xl font-black mt-2 text-black">{stat.value}</p>
-              </div>
-              <div className={`p-4 ${stat.iconBg} border-2 border-black rounded shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]`}>
-                <span className="text-3xl">{stat.icon}</span>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* Recent Activity */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Server Status */}
-        <div className="bg-white border-4 border-black rounded-lg shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
-          <div className="p-4 bg-gradient-to-r from-cyan-100 to-blue-100 border-b-4 border-black">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-white border-2 border-black rounded shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
-                <Server className="w-5 h-5 text-blue-600" />
-              </div>
-              <h3 className="text-lg font-black text-black uppercase">Server Status</h3>
-            </div>
-          </div>
-          <div className="p-4">
-            <div className="space-y-3">
-              {servers.slice(0, 5).map((server) => (
-                <div key={server.id} className="flex items-center justify-between p-3 bg-stone-50 border-2 border-black rounded hover:bg-stone-100 transition-colors">
-                  <div className="flex items-center gap-3">
-                    <div className="p-1.5 bg-white border-2 border-black rounded">
-                      <Wifi className="w-4 h-4 text-gray-700" />
-                    </div>
-                    <div>
-                      <p className="font-bold text-sm">{server.id}</p>
-                      <p className="text-xs font-mono text-gray-600">
-                        {server.host}:{server.port}
-                      </p>
-                    </div>
-                  </div>
-                  <span className={`px-3 py-1.5 border-2 border-black rounded font-bold text-xs uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${
-                    server.status === 'Running'
-                      ? 'bg-green-300 text-black'
-                      : server.status === 'Stopped'
-                      ? 'bg-gray-300 text-black'
-                      : 'bg-red-300 text-black'
-                  }`}>
-                    {typeof server.status === 'string' ? server.status : 'Error'}
-                  </span>
-                </div>
-              ))}
-              {servers.length === 0 && (
-                <div className="text-center py-8">
-                  <div className="inline-block p-4 bg-gray-100 border-2 border-black rounded-lg mb-3">
-                    <Server className="w-12 h-12 text-gray-400 mx-auto" />
-                  </div>
-                  <p className="text-gray-600 font-bold">No servers running</p>
-                  <p className="text-xs text-gray-500 mt-1">Start a server to see it here</p>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Session Activity */}
-        <div className="bg-white border-4 border-black rounded-lg shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
-          <div className="p-4 bg-gradient-to-r from-purple-100 to-pink-100 border-b-4 border-black">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-white border-2 border-black rounded shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
-                <Zap className="w-5 h-5 text-purple-600" />
-              </div>
-              <h3 className="text-lg font-black text-black uppercase">Session Activity</h3>
-            </div>
-          </div>
-          <div className="p-4">
-            <div className="space-y-3">
-              {sessions.slice(0, 5).map((session) => (
-                <div key={session.id} className="flex items-center justify-between p-3 bg-stone-50 border-2 border-black rounded hover:bg-stone-100 transition-colors">
-                  <div className="flex items-center gap-3">
-                    <div className="p-1.5 bg-white border-2 border-black rounded">
-                      <Cpu className="w-4 h-4 text-gray-700" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="font-bold text-sm truncate">{session.id}</p>
-                      {session.task && (
-                        <p className="text-xs text-gray-600 truncate max-w-[200px]">
-                          {session.task.prompt}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                  <span className={`px-3 py-1.5 border-2 border-black rounded font-bold text-xs uppercase shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] ${
-                    session.status === 'Working'
-                      ? 'bg-yellow-300 text-black animate-pulse'
-                      : session.status === 'Idle'
-                      ? 'bg-gray-300 text-black'
-                      : session.status === 'Completed'
-                      ? 'bg-green-300 text-black'
-                      : 'bg-red-300 text-black'
-                  }`}>
-                    {typeof session.status === 'string' ? session.status : 'Failed'}
-                  </span>
-                </div>
-              ))}
-              {sessions.length === 0 && (
-                <div className="text-center py-8">
-                  <div className="inline-block p-4 bg-gray-100 border-2 border-black rounded-lg mb-3">
-                    <Cpu className="w-12 h-12 text-gray-400 mx-auto" />
-                  </div>
-                  <p className="text-gray-600 font-bold">No active sessions</p>
-                  <p className="text-xs text-gray-500 mt-1">Sessions will appear here when created</p>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Claude Code Status */}
-      <div className="mt-8 grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* System Health */}
-        <div className="bg-gradient-to-r from-yellow-100 to-orange-100 border-4 border-black rounded-lg p-6 shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="p-3 bg-white border-2 border-black rounded shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
-                <Database className="w-6 h-6 text-orange-600" />
-              </div>
-              <div>
-                <h3 className="text-lg font-black text-black uppercase">System Health</h3>
-                <p className="text-sm text-gray-700">
-                  {runningServers > 0
-                    ? `${runningServers} server${runningServers > 1 ? 's' : ''} operational`
-                    : 'No servers running'}
-                </p>
-              </div>
-            </div>
-            <div className="flex gap-3">
-              <div className="text-center">
-                <div className="text-2xl font-black text-black">{idleSessions}</div>
-                <div className="text-xs font-bold text-gray-600 uppercase">Idle</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-black text-green-600">{activeSessions}</div>
-                <div className="text-xs font-bold text-gray-600 uppercase">Active</div>
-              </div>
-              <div className="text-center">
-                <div className="text-2xl font-black text-purple-600">{completedSessions}</div>
-                <div className="text-xs font-bold text-gray-600 uppercase">Done</div>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Claude Code Integration */}
-        <div className="bg-gradient-to-r from-orange-100 to-red-100 border-4 border-black rounded-lg p-6 shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
-              <div className="p-3 bg-white border-2 border-black rounded shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
-                <ClaudeIcon className="text-orange-600" size="24" />
-              </div>
-              <div>
-                <h3 className="text-lg font-black text-black uppercase">Claude Code</h3>
-                <p className="text-sm text-gray-700">
-                  AI-powered development assistant
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <Bot className="w-5 h-5 text-gray-600" />
-                <span className="text-sm font-bold text-gray-700">Ready</span>
-              </div>
-              <div className="p-2 bg-green-300 border-2 border-black rounded-full shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
-                <div className="w-3 h-3 bg-green-600 rounded-full animate-pulse" />
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* AI Agents Status */}
+      {/* Services Status */}
       <div className="mt-6">
         <div className="bg-white border-4 border-black rounded-lg shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
           <div className="p-4 bg-gradient-to-r from-rose-100 to-orange-100 border-b-4 border-black">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-white border-2 border-black rounded shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
-                  <ClaudeIcon className="text-orange-700" size="20" />
-                </div>
-                <h3 className="text-lg font-black text-black uppercase">AI Agents</h3>
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-white border-2 border-black rounded shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
+                <Activity className="text-orange-700 w-5 h-5" />
               </div>
-              <div className="flex items-center gap-6">
-                <div className="flex items-center gap-2">
-                  <div className="w-3 h-3 bg-green-500 rounded-full" />
-                  <span className="text-xs font-bold uppercase">Claude Code Active</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <div className="w-3 h-3 bg-blue-500 rounded-full" />
-                  <span className="text-xs font-bold uppercase">OpenCode Ready</span>
-                </div>
-              </div>
+              <h3 className="text-lg font-black text-black uppercase">Services</h3>
             </div>
           </div>
           <div className="p-6">
@@ -286,19 +172,62 @@ const Dashboard: React.FC<DashboardProps> = ({ servers, sessions }) => {
               </div>
               <div className="p-4 bg-blue-50 border-2 border-black rounded hover:bg-blue-100 transition-colors">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-3xl">🤖</span>
-                  <span className="px-2 py-1 bg-blue-300 border border-black rounded text-xs font-bold uppercase">Ready</span>
+                  <Bot className="w-8 h-8 text-blue-600" />
+                  {claudeAgentStatus.configured ? (
+                    <span className="px-2 py-1 bg-green-300 border border-black rounded text-xs font-bold uppercase">Ready</span>
+                  ) : (
+                    <span className="px-2 py-1 bg-yellow-300 border border-black rounded text-xs font-bold uppercase">Need API Key</span>
+                  )}
                 </div>
-                <h4 className="font-bold text-sm mb-1">OpenCode</h4>
-                <p className="text-xs text-gray-600">Open source coding agent</p>
+                <h4 className="font-bold text-sm mb-1">Claude Agent</h4>
+                <p className="text-xs text-gray-600">
+                  {claudeAgentStatus.configured
+                    ? 'Direct SDK integration • API key configured'
+                    : 'Configure API key in plugin settings'
+                  }
+                </p>
               </div>
               <div className="p-4 bg-purple-50 border-2 border-black rounded hover:bg-purple-100 transition-colors">
                 <div className="flex items-center justify-between mb-2">
-                  <span className="text-3xl">🧠</span>
-                  <span className="px-2 py-1 bg-gray-300 border border-black rounded text-xs font-bold uppercase">Config</span>
+                  <MessageSquare className="w-8 h-8 text-purple-600" />
+                  {loadingSlack ? (
+                    <span className="px-2 py-1 bg-gray-300 border border-black rounded text-xs font-bold uppercase">Loading...</span>
+                  ) : slackStatus.service_running && slackStatus.initialized ? (
+                    <span className="px-2 py-1 bg-green-300 border border-black rounded text-xs font-bold uppercase">Connected</span>
+                  ) : slackStatus.service_running ? (
+                    <span className="px-2 py-1 bg-yellow-300 border border-black rounded text-xs font-bold uppercase">Not Configured</span>
+                  ) : (
+                    <span className="px-2 py-1 bg-gray-300 border border-black rounded text-xs font-bold uppercase">Offline</span>
+                  )}
                 </div>
-                <h4 className="font-bold text-sm mb-1">Custom Agent</h4>
-                <p className="text-xs text-gray-600">Configure your own agent</p>
+                <h4 className="font-bold text-sm mb-1">Slack Service</h4>
+                <p className="text-xs text-gray-600 mb-3">
+                  {slackStatus.service_running && slackStatus.initialized
+                    ? `Port ${slackStatus.port || 3456} • ${slackStatus.connected_channels || 0} channels`
+                    : slackStatus.service_running
+                    ? 'Service running - configure in Admin → Notifications'
+                    : 'Approval and notification service'
+                  }
+                </p>
+                <div className="flex gap-2">
+                  {slackStatus.service_running ? (
+                    <button
+                      onClick={handleStopSlack}
+                      disabled={slackActionLoading}
+                      className="flex-1 px-3 py-1 bg-red-500 hover:bg-red-600 disabled:bg-gray-300 text-white text-xs font-bold border-2 border-black rounded transition-colors disabled:cursor-not-allowed"
+                    >
+                      {slackActionLoading ? 'STOPPING...' : 'STOP'}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleStartSlack}
+                      disabled={slackActionLoading}
+                      className="flex-1 px-3 py-1 bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white text-xs font-bold border-2 border-black rounded transition-colors disabled:cursor-not-allowed"
+                    >
+                      {slackActionLoading ? 'STARTING...' : 'START'}
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           </div>

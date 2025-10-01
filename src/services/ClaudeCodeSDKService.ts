@@ -22,7 +22,7 @@ export interface ClaudeCodeConfig {
 
 class ClaudeCodeSDKService {
   private sessions: Map<string, ClaudeCodeSession> = new Map();
-  private model: string = 'claude-sonnet-4-20250514';
+  private model: string = 'claude-sonnet-4-5-20250929';
 
   async initialize(config: ClaudeCodeConfig): Promise<void> {
     if (config.model) {
@@ -292,6 +292,37 @@ class ClaudeCodeSDKService {
 
   setModel(model: string): void {
     this.model = model;
+    console.log(`Model updated to: ${model}`);
+  }
+
+  /**
+   * Update the model for an existing session
+   * This will affect the next message sent to that session
+   */
+  async updateSessionModel(sessionId: string, model: string): Promise<void> {
+    try {
+      // Update backend session model
+      await invoke('claude_update_session_model', {
+        sessionId,
+        model
+      });
+      console.log(`Updated session ${sessionId} to use model: ${model}`);
+    } catch (error) {
+      console.error('Failed to update session model (command may not exist yet):', error);
+      // If backend doesn't support it yet, at least log the issue
+    }
+  }
+
+  /**
+   * Update all existing sessions to use the new model
+   */
+  async updateAllSessionsModel(model: string): Promise<void> {
+    const sessionIds = Array.from(this.sessions.keys());
+    console.log(`Updating ${sessionIds.length} sessions to use model: ${model}`);
+
+    for (const sessionId of sessionIds) {
+      await this.updateSessionModel(sessionId, model);
+    }
   }
 }
 

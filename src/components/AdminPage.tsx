@@ -1,9 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Key, Eye, EyeOff, Save, Trash2, Shield, Check, AlertTriangle, Bot, MessageSquare, Settings, Database, Zap, ChevronRight } from 'lucide-react';
+import { Key, Eye, EyeOff, Save, Trash2, Shield, Check, AlertTriangle, Bot, MessageSquare, Settings, Database, Zap, ChevronRight, Bell, Brain, RefreshCw } from 'lucide-react';
 import { apiKeyService, type ApiKeyConfig } from '../services/ApiKeyService';
 import { SlackSettings } from './SlackSettings';
+import { desktopNotificationService } from '../services/DesktopNotificationService';
+import { claudeAgentService } from '../services/ClaudeAgentService';
+import { ollamaService } from '../services/OllamaService';
 
-type TabId = 'ai-models' | 'slack' | 'database' | 'integrations';
+type TabId = 'ai-models' | 'notifications' | 'database' | 'integrations';
 
 interface Tab {
   id: TabId;
@@ -19,6 +22,13 @@ export const AdminPage: React.FC = () => {
   const [isSaving, setIsSaving] = useState(false);
   const [savedProviders, setSavedProviders] = useState<Set<string>>(new Set());
   const [validationErrors, setValidationErrors] = useState<{ [key: string]: string }>({});
+  const [notificationCountdown, setNotificationCountdown] = useState<number | null>(null);
+
+  // Ollama state
+  const [ollamaConfig, setOllamaConfig] = useState(ollamaService.getConfig());
+  const [ollamaHealth, setOllamaHealth] = useState<boolean | null>(null);
+  const [ollamaModels, setOllamaModels] = useState<any[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
 
   const tabs: Tab[] = [
     {
@@ -28,9 +38,9 @@ export const AdminPage: React.FC = () => {
       color: 'purple'
     },
     {
-      id: 'slack',
-      label: 'Slack',
-      icon: <MessageSquare className="h-5 w-5" strokeWidth={2.5} />,
+      id: 'notifications',
+      label: 'Notifications',
+      icon: <Bell className="h-5 w-5" strokeWidth={2.5} />,
       color: 'blue'
     },
     {
@@ -51,7 +61,30 @@ export const AdminPage: React.FC = () => {
     // Load existing API keys
     const keys = apiKeyService.getAllKeys();
     setApiKeys(keys);
+
+    // Check Ollama health and load models
+    checkOllamaHealth();
   }, []);
+
+  const checkOllamaHealth = async () => {
+    const healthy = await ollamaService.checkHealth();
+    setOllamaHealth(healthy);
+    if (healthy) {
+      loadOllamaModels();
+    }
+  };
+
+  const loadOllamaModels = async () => {
+    setLoadingModels(true);
+    try {
+      const models = await ollamaService.listModels();
+      setOllamaModels(models);
+    } catch (error) {
+      console.error('Failed to load Ollama models:', error);
+    } finally {
+      setLoadingModels(false);
+    }
+  };
 
   const handleKeyChange = (provider: string, value: string) => {
     setApiKeys(prev => ({ ...prev, [provider]: value }));
@@ -88,7 +121,7 @@ export const AdminPage: React.FC = () => {
     return true;
   };
 
-  const handleSaveKey = (provider: string) => {
+  const handleSaveKey = async (provider: string) => {
     const key = apiKeys[provider];
 
     if (!validateKey(provider, key || '')) {
@@ -97,6 +130,17 @@ export const AdminPage: React.FC = () => {
 
     apiKeyService.setKey(provider, key);
     setSavedProviders(prev => new Set([...prev, provider]));
+
+    // If this is an Anthropic API key, initialize the Claude Agent service
+    if (provider === 'anthropic' && key) {
+      try {
+        await claudeAgentService.initialize(key);
+        console.log('Claude Agent service initialized with new API key');
+      } catch (error) {
+        console.error('Failed to initialize Claude Agent service:', error);
+        // Don't fail the save operation, just log the error
+      }
+    }
 
     // Clear saved indicator after 2 seconds
     setTimeout(() => {
@@ -108,7 +152,7 @@ export const AdminPage: React.FC = () => {
     }, 2000);
   };
 
-  const handleSaveAll = () => {
+  const handleSaveAll = async () => {
     setIsSaving(true);
 
     // Validate all keys
@@ -121,6 +165,18 @@ export const AdminPage: React.FC = () => {
 
     if (!hasErrors) {
       apiKeyService.setKeys(apiKeys);
+
+      // If there's an Anthropic API key, initialize the Claude Agent service
+      if (apiKeys.anthropic) {
+        try {
+          await claudeAgentService.initialize(apiKeys.anthropic);
+          console.log('Claude Agent service initialized with new API key');
+        } catch (error) {
+          console.error('Failed to initialize Claude Agent service:', error);
+          // Don't fail the save operation, just log the error
+        }
+      }
+
       // Show all as saved
       setSavedProviders(new Set(Object.keys(apiKeys)));
 
@@ -171,8 +227,173 @@ export const AdminPage: React.FC = () => {
   };
 
   const renderAIModelsTab = () => (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-      {apiKeyService.getProvidersRequiringKeys().map(provider => {
+    <div className="space-y-6">
+      {/* Ollama Configuration Section */}
+      <div className="bg-gradient-to-br from-purple-50 to-blue-50 border-4 border-purple-600 rounded-lg shadow-[6px_6px_0px_0px_rgba(147,51,234,1)] overflow-hidden">
+        <div className="px-6 py-4 bg-gradient-to-r from-purple-600 to-blue-600 border-b-4 border-purple-700">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg border-2 border-white bg-white/20">
+                <Brain className="h-6 w-6 text-white" strokeWidth={2.5} />
+              </div>
+              <div>
+                <h3 className="text-xl font-bold text-white">Ollama (Local AI)</h3>
+                <div className="flex items-center gap-2 mt-1">
+                  {ollamaHealth === true && (
+                    <span className="text-xs bg-green-500 text-white px-2 py-0.5 rounded-full font-bold">
+                      ✓ Connected
+                    </span>
+                  )}
+                  {ollamaHealth === false && (
+                    <span className="text-xs bg-red-500 text-white px-2 py-0.5 rounded-full font-bold">
+                      Offline
+                    </span>
+                  )}
+                  {ollamaModels.length > 0 && (
+                    <span className="text-xs text-white/80">
+                      {ollamaModels.length} models installed
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+            <button
+              onClick={checkOllamaHealth}
+              className="p-2 text-white hover:bg-white/20 rounded-lg transition-colors"
+              title="Refresh status"
+            >
+              <RefreshCw className="h-5 w-5" strokeWidth={2.5} />
+            </button>
+          </div>
+        </div>
+
+        <div className="p-6 space-y-4">
+          {ollamaHealth === false && (
+            <div className="p-4 bg-red-50 border-2 border-red-300 rounded-lg">
+              <p className="text-sm text-red-800 font-medium mb-2">
+                ⚠️ Ollama is not running or not installed
+              </p>
+              <p className="text-xs text-red-700">
+                Install Ollama from <a href="https://ollama.ai/download" target="_blank" rel="noopener noreferrer" className="underline font-bold">ollama.ai/download</a> to enable local AI analysis
+              </p>
+            </div>
+          )}
+
+          {/* Enable/Disable Toggle */}
+          <div className="flex items-center justify-between p-4 bg-white border-2 border-purple-300 rounded-lg">
+            <div>
+              <label className="text-sm font-bold text-gray-800">Enable Ollama Analysis</label>
+              <p className="text-xs text-gray-600 mt-1">Analyze dev server output with local LLM</p>
+            </div>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={ollamaConfig.enabled}
+                onChange={(e) => {
+                  const newConfig = { ...ollamaConfig, enabled: e.target.checked };
+                  setOllamaConfig(newConfig);
+                  ollamaService.updateConfig({ enabled: e.target.checked });
+                }}
+                className="sr-only peer"
+                disabled={ollamaHealth === false}
+              />
+              <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-purple-500 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-purple-600 peer-disabled:opacity-50"></div>
+            </label>
+          </div>
+
+          {/* Model Selection */}
+          <div>
+            <label className="block text-sm font-bold text-gray-800 mb-2">Model</label>
+            <select
+              value={ollamaConfig.model}
+              onChange={(e) => {
+                const newConfig = { ...ollamaConfig, model: e.target.value };
+                setOllamaConfig(newConfig);
+                ollamaService.updateConfig({ model: e.target.value });
+              }}
+              className="w-full px-4 py-2 bg-white border-2 border-purple-300 rounded-lg text-gray-800 focus:outline-none focus:border-purple-600 disabled:opacity-50"
+              disabled={ollamaHealth === false || loadingModels}
+            >
+              {loadingModels && <option>Loading models...</option>}
+              {!loadingModels && ollamaModels.length === 0 && <option>No models installed</option>}
+              {!loadingModels && ollamaModels.map(model => (
+                <option key={model.name} value={model.name}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-600 mt-1">
+              Pull models with: <code className="bg-gray-100 px-1 py-0.5 rounded font-mono">ollama pull llama3.1</code>
+            </p>
+          </div>
+
+          {/* Advanced Settings */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-bold text-gray-800 mb-2">Temperature</label>
+              <input
+                type="number"
+                min="0"
+                max="2"
+                step="0.1"
+                value={ollamaConfig.temperature}
+                onChange={(e) => {
+                  const newConfig = { ...ollamaConfig, temperature: parseFloat(e.target.value) };
+                  setOllamaConfig(newConfig);
+                  ollamaService.updateConfig({ temperature: parseFloat(e.target.value) });
+                }}
+                className="w-full px-3 py-2 bg-white border-2 border-purple-300 rounded-lg text-gray-800 focus:outline-none focus:border-purple-600"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-bold text-gray-800 mb-2">Max Tokens</label>
+              <input
+                type="number"
+                min="100"
+                max="2000"
+                step="100"
+                value={ollamaConfig.maxTokens}
+                onChange={(e) => {
+                  const newConfig = { ...ollamaConfig, maxTokens: parseInt(e.target.value) };
+                  setOllamaConfig(newConfig);
+                  ollamaService.updateConfig({ maxTokens: parseInt(e.target.value) });
+                }}
+                className="w-full px-3 py-2 bg-white border-2 border-purple-300 rounded-lg text-gray-800 focus:outline-none focus:border-purple-600"
+              />
+            </div>
+          </div>
+
+          {/* Installed Models */}
+          {ollamaModels.length > 0 && (
+            <div>
+              <label className="block text-sm font-bold text-gray-800 mb-2">Installed Models</label>
+              <div className="space-y-2">
+                {ollamaModels.map(model => (
+                  <div key={model.name} className="flex items-center justify-between p-3 bg-white border-2 border-purple-200 rounded-lg">
+                    <div>
+                      <p className="text-sm font-mono font-bold text-gray-800">{model.name}</p>
+                      <p className="text-xs text-gray-600">
+                        Modified: {new Date(model.modified_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                    {model.name === ollamaConfig.model && (
+                      <span className="text-xs bg-purple-600 text-white px-2 py-1 rounded-full font-bold">
+                        Active
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Cloud AI Providers Section */}
+      <div>
+        <h3 className="text-lg font-bold text-gray-800 mb-4">Cloud AI Providers</h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {apiKeyService.getProvidersRequiringKeys().map(provider => {
         const status = getKeyStatus(provider.id);
 
         return (
@@ -311,6 +532,8 @@ export const AdminPage: React.FC = () => {
           </div>
         );
       })}
+        </div>
+      </div>
     </div>
   );
 
@@ -328,42 +551,125 @@ export const AdminPage: React.FC = () => {
     </div>
   );
 
+  const renderNotificationsTab = () => (
+    <div className="space-y-6">
+      {/* Desktop Notifications Test */}
+      <div className="bg-white border-4 border-black rounded-lg shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] p-8">
+        <div className="space-y-6">
+          <div>
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+              <Bell className="h-5 w-5 text-blue-500" />
+              Desktop Notifications Test
+            </h3>
+            <p className="text-sm text-gray-600 mb-4">
+              Test desktop notifications to ensure they're working correctly on your system.
+            </p>
+            <button
+              onClick={async () => {
+                console.log('Test notification button clicked');
+                try {
+                  const { isPermissionGranted, requestPermission, sendNotification } = await import('@tauri-apps/plugin-notification');
+
+                  // Use exact pattern from docs
+                  let ok = await isPermissionGranted();
+                  console.log('Permission status:', ok);
+
+                  if (!ok) {
+                    ok = (await requestPermission()) === 'granted';
+                    console.log('After request:', ok);
+                  }
+
+                  if (ok) {
+                    // Start countdown
+                    setNotificationCountdown(5);
+
+                    const countdownInterval = setInterval(() => {
+                      setNotificationCountdown(prev => {
+                        if (prev === null || prev <= 1) {
+                          clearInterval(countdownInterval);
+                          return null;
+                        }
+                        return prev - 1;
+                      });
+                    }, 1000);
+
+                    // Wait 5 seconds before sending
+                    setTimeout(() => {
+                      console.log('Sending notification...');
+                      sendNotification({ title: 'Ninja Squad', body: 'Test notification from dev build' });
+                      console.log('Notification sent!');
+                      setNotificationCountdown(null);
+                    }, 5000);
+                  } else {
+                    alert('Notification permission denied.\n\nTo enable:\n1. Open System Settings\n2. Go to Notifications\n3. Find "ninjasquad" or "Ninja Squad"\n4. Enable notifications and set to Banners or Alerts');
+                  }
+                } catch (error) {
+                  console.error('Test notification error:', error);
+                  alert('Error sending test notification:\n' + error);
+                  setNotificationCountdown(null);
+                }
+              }}
+              disabled={notificationCountdown !== null}
+              className="px-6 py-3 bg-blue-500 text-white border-2 border-black rounded-lg shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center gap-2 font-bold"
+            >
+              <Bell className="h-5 w-5" />
+              {notificationCountdown !== null
+                ? `Sending in ${notificationCountdown}s... (minimize app now)`
+                : 'Send Test Notification'}
+            </button>
+            <p className="text-xs text-blue-600 bg-blue-50 border-2 border-blue-300 rounded p-3 mt-4">
+              <strong>Note:</strong> Desktop notifications don't work reliably in development mode.
+              <strong> Slack notifications are used instead</strong> - make sure Slack is configured below.
+              In-app notification badges (purple count on Claude Code tab) work regardless.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Slack Settings */}
+      <SlackSettings />
+    </div>
+  );
+
   const renderIntegrationsTab = () => (
-    <div className="bg-white border-4 border-black rounded-lg shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] p-8">
-      <div className="space-y-6">
-        <div>
-          <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-            <Zap className="h-5 w-5 text-orange-500" />
-            Available Integrations
-          </h3>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="p-4 border-2 border-black rounded-lg hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-bold">Linear</span>
-                <span className="text-xs bg-green-500 text-white px-2 py-1 rounded-full">Active</span>
+    <div className="space-y-6">
+      {/* Available Integrations */}
+      <div className="bg-white border-4 border-black rounded-lg shadow-[6px_6px_0px_0px_rgba(0,0,0,1)] p-8">
+        <div className="space-y-6">
+          <div>
+            <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+              <Zap className="h-5 w-5 text-orange-500" />
+              Available Integrations
+            </h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="p-4 border-2 border-black rounded-lg hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-bold">Linear</span>
+                  <span className="text-xs bg-green-500 text-white px-2 py-1 rounded-full">Active</span>
+                </div>
+                <p className="text-sm text-gray-600">Issue tracking and project management</p>
               </div>
-              <p className="text-sm text-gray-600">Issue tracking and project management</p>
-            </div>
-            <div className="p-4 border-2 border-black rounded-lg hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-bold">GitHub</span>
-                <span className="text-xs bg-gray-400 text-white px-2 py-1 rounded-full">Coming Soon</span>
+              <div className="p-4 border-2 border-black rounded-lg hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-bold">GitHub</span>
+                  <span className="text-xs bg-gray-400 text-white px-2 py-1 rounded-full">Coming Soon</span>
+                </div>
+                <p className="text-sm text-gray-600">Repository and code management</p>
               </div>
-              <p className="text-sm text-gray-600">Repository and code management</p>
-            </div>
-            <div className="p-4 border-2 border-black rounded-lg hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-bold">Jira</span>
-                <span className="text-xs bg-gray-400 text-white px-2 py-1 rounded-full">Coming Soon</span>
+              <div className="p-4 border-2 border-black rounded-lg hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-bold">Jira</span>
+                  <span className="text-xs bg-gray-400 text-white px-2 py-1 rounded-full">Coming Soon</span>
+                </div>
+                <p className="text-sm text-gray-600">Advanced project tracking</p>
               </div>
-              <p className="text-sm text-gray-600">Advanced project tracking</p>
-            </div>
-            <div className="p-4 border-2 border-black rounded-lg hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-bold">Discord</span>
-                <span className="text-xs bg-gray-400 text-white px-2 py-1 rounded-full">Coming Soon</span>
+              <div className="p-4 border-2 border-black rounded-lg hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-bold">Discord</span>
+                  <span className="text-xs bg-gray-400 text-white px-2 py-1 rounded-full">Coming Soon</span>
+                </div>
+                <p className="text-sm text-gray-600">Team communication and notifications</p>
               </div>
-              <p className="text-sm text-gray-600">Team communication and notifications</p>
             </div>
           </div>
         </div>
@@ -427,7 +733,7 @@ export const AdminPage: React.FC = () => {
         {/* Tab Content */}
         <div className="transition-all">
           {activeTab === 'ai-models' && renderAIModelsTab()}
-          {activeTab === 'slack' && <SlackSettings />}
+          {activeTab === 'notifications' && renderNotificationsTab()}
           {activeTab === 'database' && renderDatabaseTab()}
           {activeTab === 'integrations' && renderIntegrationsTab()}
         </div>

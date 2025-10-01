@@ -306,8 +306,19 @@ export const Terminal: React.FC<TerminalProps> = ({ serverId, sessionId, isNewSe
           xtermRef.current.write(output);
 
           // Send output to Sensei if enabled
+          console.log('🖥️ [Terminal] Output received:', {
+            enableSensei,
+            hasServerId: !!serverId,
+            hasSessionId: !!sessionId,
+            outputLength: output.length,
+            outputPreview: output.substring(0, 50)
+          });
+
           if (enableSensei && serverId && sessionId) {
+            console.log('✅ [Terminal] Sending to Sensei:', { serverId, sessionId });
             senseiService.appendOutput(serverId, sessionId, output);
+          } else {
+            console.log('❌ [Terminal] NOT sending to Sensei - conditions not met');
           }
 
           // Check for error messages with log file paths

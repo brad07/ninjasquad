@@ -25,6 +25,7 @@ const PluginSelector: React.FC<PluginSelectorProps> = ({ onPluginChange, classNa
   const [showSettings, setShowSettings] = useState(false);
   const [apiKey, setApiKey] = useState('');
   const [selectedModel, setSelectedModel] = useState('');
+  const [timeout, setTimeout] = useState(600); // Default 600 seconds (10 minutes)
 
   useEffect(() => {
     loadPlugins();
@@ -46,9 +47,11 @@ const PluginSelector: React.FC<PluginSelectorProps> = ({ onPluginChange, classNa
     if (settings) {
       setApiKey(settings.apiKey || '');
       setSelectedModel(settings.model || plugin.defaultModel);
+      setTimeout(settings.timeout || 600);
     } else {
       setApiKey('');
       setSelectedModel(plugin.defaultModel);
+      setTimeout(600);
     }
   };
 
@@ -78,7 +81,8 @@ const PluginSelector: React.FC<PluginSelectorProps> = ({ onPluginChange, classNa
     try {
       const settings: Partial<PluginSettings> = {
         pluginId: activePlugin.id,
-        model: selectedModel
+        model: selectedModel,
+        timeout: timeout
       };
 
       if (activePlugin.requiresApiKey) {
@@ -126,14 +130,14 @@ const PluginSelector: React.FC<PluginSelectorProps> = ({ onPluginChange, classNa
             <ChevronDown className="ml-2 h-4 w-4" />
           </Button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent className="w-72">
-          <DropdownMenuLabel>Coding Agents</DropdownMenuLabel>
+        <DropdownMenuContent className="w-72 !bg-white">
+          <DropdownMenuLabel className="bg-white">Coding Agents</DropdownMenuLabel>
           <DropdownMenuSeparator />
           {plugins.sort((a, b) => a.name.localeCompare(b.name)).map(plugin => (
             <DropdownMenuItem
               key={plugin.id}
               onClick={() => handlePluginSelect(plugin)}
-              className="cursor-pointer"
+              className="cursor-pointer bg-white hover:bg-yellow-400"
             >
               <div className="flex items-center justify-between w-full">
                 <div className="flex items-center space-x-3">
@@ -208,6 +212,24 @@ const PluginSelector: React.FC<PluginSelectorProps> = ({ onPluginChange, classNa
                   </option>
                 ))}
               </select>
+            </div>
+
+            {/* Timeout Setting */}
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Timeout (seconds)
+              </label>
+              <input
+                type="number"
+                value={timeout}
+                onChange={(e) => setTimeout(parseInt(e.target.value, 10) || 600)}
+                min="1"
+                max="3600"
+                className="w-full px-3 py-2 bg-white border-2 border-black rounded text-gray-900 focus:outline-none focus:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Maximum time to wait for agent responses (default: 600 seconds / 10 minutes)
+              </p>
             </div>
 
             {/* Plugin Capabilities */}

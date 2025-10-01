@@ -38,6 +38,8 @@ import {
   MessageSquare,
   Send
 } from 'lucide-react';
+import { TipTapEditor } from './shared/TipTapEditor';
+import ReactMarkdown from 'react-markdown';
 
 // Sub-issue modal component
 interface SubIssueModalProps {
@@ -1406,16 +1408,15 @@ const LinearPage: React.FC = () => {
                   )}
                 </div>
                 {isEditingDescription ? (
-                  <textarea
-                    value={editedDescription}
-                    onChange={(e) => setEditedDescription(e.target.value)}
-                    className="w-full min-h-[200px] p-3 border border-gray-300 rounded text-sm bg-white text-gray-900 focus:border-gray-400 focus:outline-none"
+                  <TipTapEditor
+                    content={editedDescription}
+                    onChange={(content) => setEditedDescription(content)}
                     placeholder="Add a description..."
                   />
                 ) : (
                   selectedIssue.description ? (
-                    <div className="prose prose-sm max-w-none">
-                      <pre className="whitespace-pre-wrap font-sans text-gray-700 text-sm">{selectedIssue.description}</pre>
+                    <div className="prose prose-sm max-w-none text-gray-700">
+                      <ReactMarkdown>{selectedIssue.description}</ReactMarkdown>
                     </div>
                   ) : (
                     <p className="text-gray-500 italic text-sm">No description</p>

@@ -5,6 +5,7 @@ import { claudeCodeSDKService } from '../../services/ClaudeCodeSDKService';
 import { emit, listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { senseiService } from '../../services/SenseiService';
+import { ToolUseDisplay, ToolUse as SharedToolUse } from '../shared/ToolUseDisplay';
 import '../../styles/sensei-animations.css';
 
 /**
@@ -28,7 +29,10 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
   const [showToolDetails, setShowToolDetails] = useState(true);
   const [localSessionId, setLocalSessionId] = useState<string | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
+  const [showServiceLogs, setShowServiceLogs] = useState(false);
+  const [serviceLogs, setServiceLogs] = useState<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const logsEndRef = useRef<HTMLDivElement>(null);
 
   // Use session ID from props if available, otherwise use local
   const sessionId = session?.id || localSessionId;
@@ -42,9 +46,11 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
     // Skip initialization if we don't have a session from props yet
     // Parent component should provide the session
     if (!session?.id) {
-      console.log('Waiting for session ID from parent component...');
+      console.log('Waiting for session ID from parent component...', { session, hasId: !!session?.id });
       return;
     }
+
+    console.log('ClaudeCodeUI received session:', session?.id);
 
     const initializeClaudeCode = async () => {
       console.log('=== ClaudeCodeUI initialization with session from parent ===', {
@@ -70,20 +76,33 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
         if (!existingSession) {
           console.log('Registering session in service with ID:', sid);
           await claudeCodeSDKService.createSession(sid, workingDirectory);
-        } else if (workingDirectory && workingDirectory !== workingDirRef.current) {
-          // Only update working directory if it actually changed
-          claudeCodeSDKService.updateSessionWorkingDirectory(sid, workingDirectory);
-          workingDirRef.current = workingDirectory;
-          console.log('Updated session working directory:', {
-            sessionId: sid,
-            workingDirectory: workingDirectory
-          });
+        } else {
+          // Update session model if it changed
+          console.log('Updating existing session model to:', model);
+          await claudeCodeSDKService.updateSessionModel(sid, model);
+
+          // Update working directory if it changed
+          if (workingDirectory && workingDirectory !== workingDirRef.current) {
+            claudeCodeSDKService.updateSessionWorkingDirectory(sid, workingDirectory);
+            workingDirRef.current = workingDirectory;
+            console.log('Updated session working directory:', {
+              sessionId: sid,
+              workingDirectory: workingDirectory
+            });
+          }
         }
 
         // Update refs with the session ID from props
         sessionIdRef.current = sid;
         setLocalSessionId(sid);
         setIsInitialized(true);
+
+        // Add initialization log after state is set
+        setTimeout(() => {
+          const timestamp = new Date().toLocaleTimeString();
+          const logEntry = `[${timestamp}] ✓ Claude Code initialized (session: ${sid.slice(-4)}, model: ${model})`;
+          setServiceLogs(prev => [...prev, logEntry]);
+        }, 100);
       } catch (error) {
         console.error('Failed to initialize Claude Code:', error);
       }
@@ -101,56 +120,63 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
     let unlisten: (() => void) | null = null;
     let isMounted = true;
 
+    const handleApproval = (payload: any) => {
+      if (!isMounted) return;
+
+      console.log('Received Sensei-approved recommendation:', payload);
+
+      // Check for duplicate messages (same timestamp and content)
+      const isDuplicate = messages.some(msg =>
+        msg.timestamp === payload.timestamp &&
+        msg.content?.includes(payload.recommendation)
+      );
+
+      if (isDuplicate) {
+        console.log('Duplicate Sensei message detected, ignoring');
+        return;
+      }
+
+      // Add as a new message from user and send to Claude
+      const senseiMessage: ConversationMessage = {
+        id: `sensei-${Date.now()}-${Math.random()}`,
+        role: 'user',
+        content: payload.recommendation,
+        timestamp: new Date().toISOString()
+      };
+
+      // Add to messages
+      setMessages(prev => [...prev, senseiMessage]);
+
+      // Send to Claude Code for processing if we have a session
+      if (sessionIdRef.current) {
+        console.log('Processing approved recommendation with session:', sessionIdRef.current);
+        // Process the approved recommendation as a new message
+        handleApprovedRecommendation(payload.recommendation);
+      } else {
+        console.error('No session available to process approved recommendation');
+      }
+    };
+
     const setupListener = async () => {
+      // Listen for Tauri events
       unlisten = await listen('sensei-approved', (event) => {
-        if (!isMounted) return; // Prevent processing if unmounted
-
-        const payload = event.payload as {
-          sessionId: string;
-          recommendation: string;
-          confidence: number;
-          timestamp: string;
-        };
-
-        console.log('Received Sensei-approved recommendation:', payload);
-
-        // Check for duplicate messages (same timestamp and content)
-        const isDuplicate = messages.some(msg =>
-          msg.timestamp === payload.timestamp &&
-          msg.content?.includes(payload.recommendation)
-        );
-
-        if (isDuplicate) {
-          console.log('Duplicate Sensei message detected, ignoring');
-          return;
-        }
-
-        // Add as a new message from user and send to Claude
-        const senseiMessage: ConversationMessage = {
-          id: `sensei-${Date.now()}-${Math.random()}`,
-          role: 'user',
-          content: payload.recommendation,
-          timestamp: new Date().toISOString()
-        };
-
-        // Add to messages
-        setMessages(prev => [...prev, senseiMessage]);
-
-        // Send to Claude Code for processing if we have a session
-        if (sessionIdRef.current) {
-          console.log('Processing approved recommendation with session:', sessionIdRef.current);
-          // Process the approved recommendation as a new message
-          handleApprovedRecommendation(payload.recommendation);
-        } else {
-          console.error('No session available to process approved recommendation');
-        }
+        handleApproval(event.payload);
       });
     };
 
     setupListener();
 
+    // Also listen for browser events (from Slack polling)
+    const browserEventHandler = (event: Event) => {
+      const customEvent = event as CustomEvent;
+      handleApproval(customEvent.detail);
+    };
+
+    window.addEventListener('sensei-approved', browserEventHandler);
+
     return () => {
       isMounted = false;
+      window.removeEventListener('sensei-approved', browserEventHandler);
       if (unlisten) {
         unlisten();
       }
@@ -232,8 +258,17 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
 
       setIsLoading(false);
 
-      // For approved messages, we don't need to update Sensei
-      // The original recommendation is already displayed
+      // Trigger Sensei analysis of Claude's response to the approved recommendation
+      if (currentSessionId) {
+        await senseiService.addAgentRecommendation(
+          'claude-code',
+          currentSessionId,
+          response,
+          'claude-code'
+        );
+        console.log('Triggered Sensei analysis for approved recommendation response');
+      }
+
       console.log('Completed processing approved recommendation');
     } catch (error) {
       console.error('Failed to process approved recommendation:', error);
@@ -255,6 +290,21 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const scrollLogsToBottom = () => {
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  const addServiceLog = (message: string) => {
+    const timestamp = new Date().toLocaleTimeString();
+    const logEntry = `[${timestamp}] ${message}`;
+    setServiceLogs(prev => {
+      const newLogs = [...prev, logEntry];
+      // Keep last 100 logs
+      return newLogs.slice(-100);
+    });
+    setTimeout(scrollLogsToBottom, 100);
   };
 
   const handleSendMessage = async () => {
@@ -293,8 +343,11 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
     setInput('');
     setIsLoading(true);
 
+    addServiceLog(`→ Sending message to Claude Code (${messageContent.length} chars)`);
+
     try {
       console.log('Starting Claude Code stream for session:', sessionId);
+      addServiceLog(`✓ Connected to session ${sessionId?.slice(-4) || 'unknown'}`);
       // Create initial assistant message for streaming
       const assistantMessage: ConversationMessage = {
         id: assistantMessageId,
@@ -321,6 +374,7 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
           // Log first chunk
           if (!firstChunkReceived) {
             console.log('Received first chunk from Claude:', chunk.substring(0, 50));
+            addServiceLog('← Receiving response from Claude Code...');
           }
 
           // Update the assistant message with streaming chunks
@@ -387,6 +441,7 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
       }
 
       setIsLoading(false);
+      addServiceLog(`✓ Response complete (${response.length} chars)`);
 
       // Final update to Sensei with complete response
       if (streamingRecommendationId && sessionId) {
@@ -404,31 +459,31 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
           response: response.substring(0, 50)
         });
       } else if (sessionId) {
-        // Fallback if streaming wasn't started
-        senseiService.addAgentRecommendation(
+        // Fallback if streaming wasn't started (no confidence for agent responses)
+        senseiService.addDirectRecommendation(
           'claude-code',
           sessionId,
           messageContent,
           response,
-          'claude-code',
-          0.95
+          'claude-code'
         );
       }
 
       // Also trigger Sensei's own analysis of the Claude response
       // This will generate Sensei's insights about what Claude said
       if (sessionId) {
-        // Emit an event to indicate Sensei is starting analysis
-        window.dispatchEvent(new CustomEvent('sensei-analyzing', {
-          detail: {
-            serverId: 'claude-code',
-            sessionId,
-            analyzing: true
-          }
-        }));
-
-        const conversationContext = `User asked: ${messageContent}\n\nClaude Code responded: ${response}`;
-        await senseiService.appendOutput('claude-code', sessionId, conversationContext, true);
+        // addAgentRecommendation will:
+        // 1. Emit 'sensei-analyzing' start event
+        // 2. Send Claude's response to the LLM for analysis
+        // 3. Get Sensei's recommendation for next steps
+        // 4. Emit the recommendation (which triggers Slack notification)
+        // 5. Emit 'sensei-analyzing' complete event
+        await senseiService.addAgentRecommendation(
+          'claude-code',
+          sessionId,
+          response,
+          'claude-code'
+        );
         console.log('Triggered Sensei analysis of Claude response');
       }
     } catch (error) {
@@ -440,6 +495,8 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
         sessionId,
         messageContent: messageContent.substring(0, 50)
       });
+
+      addServiceLog(`✗ ERROR: ${error instanceof Error ? error.message : 'Failed to send message'}`);
 
       // Show error message to user
       const errorMessage: ConversationMessage = {
@@ -493,50 +550,31 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
               {/* Tool Uses */}
               {message.toolUses && message.toolUses.length > 0 && (
                 <div className="mt-3 space-y-2">
-                  {message.toolUses.map(toolUse => (
-                    <div key={toolUse.toolId} className="border border-gray-700 rounded p-2">
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center space-x-2">
-                          <button
-                            onClick={() => toggleToolExpansion(toolUse.toolId)}
-                            className="text-gray-400 hover:text-gray-200"
-                          >
-                            {expandedTools.has(toolUse.toolId) ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                          </button>
-                          <span className="text-sm font-mono text-yellow-400">{toolUse.toolName}</span>
-                          {toolUse.status === 'approved' && <CheckCircle className="w-4 h-4 text-green-500" />}
-                          {toolUse.status === 'rejected' && <XCircle className="w-4 h-4 text-red-500" />}
-                        </div>
-                        {toolUse.status === 'pending' && (
-                          <div className="flex space-x-2">
-                            <button
-                              onClick={() => handleToolApproval(toolUse, true)}
-                              className="px-2 py-1 bg-green-900/50 hover:bg-green-900/70 text-green-400 text-xs rounded"
-                            >
-                              Approve
-                            </button>
-                            <button
-                              onClick={() => handleToolApproval(toolUse, false)}
-                              className="px-2 py-1 bg-red-900/50 hover:bg-red-900/70 text-red-400 text-xs rounded"
-                            >
-                              Reject
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                      {(showToolDetails || expandedTools.has(toolUse.toolId)) && (
-                        <div className="mt-2">
-                          <pre className="text-xs text-gray-300 overflow-x-auto">{toolUse.input}</pre>
-                          {toolUse.output && (
-                            <div className="mt-2 pt-2 border-t border-gray-700">
-                              <div className="text-xs text-gray-500 mb-1">Output:</div>
-                              <pre className="text-xs text-gray-400 overflow-x-auto">{toolUse.output}</pre>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                  {message.toolUses.map(toolUse => {
+                    // Convert plugin ToolUse to shared ToolUse format
+                    const sharedTool: SharedToolUse = {
+                      id: toolUse.toolId,
+                      name: toolUse.toolName,
+                      input: { raw: toolUse.input },
+                      status: toolUse.status === 'approved' ? 'approved' :
+                              toolUse.status === 'rejected' ? 'denied' : 'pending',
+                      result: toolUse.output,
+                      timestamp: Date.now()
+                    };
+
+                    return (
+                      <ToolUseDisplay
+                        key={toolUse.toolId}
+                        tool={sharedTool}
+                        themeColor="green"
+                        onApprove={() => handleToolApproval(toolUse, true)}
+                        onDeny={() => handleToolApproval(toolUse, false)}
+                        showApprovalButtons={toolUse.status === 'pending'}
+                        isExpanded={showToolDetails || expandedTools.has(toolUse.toolId)}
+                        onToggleExpand={() => toggleToolExpansion(toolUse.toolId)}
+                      />
+                    );
+                  })}
                 </div>
               )}
 
@@ -616,18 +654,13 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
           <div className="flex-1 mx-4">
             <div className="bg-gradient-to-r from-gray-100 to-gray-300 border-2 border-black px-3 py-0.5">
               <span className="font-bold text-black text-sm font-mono tracking-wider">
-                CLAUDE_CODE.EXE - [SESSION {sessionId ? sessionId.slice(-4).toUpperCase() : 'NULL'}]
+                {config?.workingDirectory ? config.workingDirectory.split('/').pop()?.toUpperCase() : 'ROOT'} - [SESSION {sessionId ? sessionId.slice(-4).toUpperCase() : 'NULL'}]
               </span>
             </div>
           </div>
 
           {/* Right side status */}
           <div className="flex items-center space-x-2">
-            <div className="bg-gray-300 border-2 border-black px-2 py-0.5">
-              <span className="text-xs font-mono font-bold text-black">
-                {config?.workingDirectory ? `C:\\${config.workingDirectory.split('/').pop()?.toUpperCase()}` : 'C:\\ROOT'}
-              </span>
-            </div>
             <button
               onClick={() => setShowToolDetails(!showToolDetails)}
               className={`p-1 border-2 border-black ${
@@ -708,8 +741,8 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyPress={(e) => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
-                    placeholder="ENTER_COMMAND"
-                    className="flex-1 bg-transparent text-green-400 px-1 focus:outline-none placeholder-green-600 font-mono text-sm uppercase"
+                    placeholder="Enter command"
+                    className="flex-1 bg-transparent text-green-400 px-1 focus:outline-none placeholder-green-600 font-mono text-sm"
                     disabled={isLoading}
                     autoFocus
                     style={{
@@ -725,6 +758,61 @@ const ClaudeCodeUI: React.FC<PluginUIProps> = ({
                   </button>
                 </div>
               </div>
+            </div>
+
+            {/* Service Logs Panel */}
+            <div className="border-t-4 border-black bg-gray-800">
+              <div
+                className="px-3 py-1 bg-gradient-to-r from-purple-600 to-purple-700 border-b-2 border-black flex items-center justify-between cursor-pointer hover:from-purple-500 hover:to-purple-600"
+                onClick={() => setShowServiceLogs(!showServiceLogs)}
+              >
+                <div className="flex items-center space-x-2">
+                  {showServiceLogs ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  <span className="text-xs font-mono font-bold text-white">SERVICE LOGS</span>
+                  <span className="text-xs font-mono text-purple-200">
+                    ({serviceLogs.length} entries)
+                  </span>
+                </div>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setServiceLogs([]);
+                  }}
+                  className="text-xs font-mono text-white hover:text-red-300 px-2 py-0.5 border border-white/30 rounded"
+                >
+                  CLEAR
+                </button>
+              </div>
+
+              {showServiceLogs && (
+                <div className="bg-black/95 overflow-y-auto max-h-48 p-2 font-mono text-xs">
+                  {serviceLogs.length === 0 ? (
+                    <div className="text-gray-600 text-center py-2">
+                      [No service logs yet]
+                    </div>
+                  ) : (
+                    serviceLogs.map((log, index) => (
+                      <div
+                        key={index}
+                        className={`py-0.5 ${
+                          log.includes('✗') || log.includes('ERROR')
+                            ? 'text-red-400'
+                            : log.includes('✓')
+                            ? 'text-green-400'
+                            : log.includes('←')
+                            ? 'text-cyan-400'
+                            : log.includes('→')
+                            ? 'text-yellow-400'
+                            : 'text-gray-400'
+                        }`}
+                      >
+                        {log}
+                      </div>
+                    ))
+                  )}
+                  <div ref={logsEndRef} />
+                </div>
+              )}
             </div>
           </div>
 

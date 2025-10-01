@@ -23,11 +23,11 @@ export const SlackSettings: React.FC<SlackSettingsProps> = ({ onClose }) => {
   });
   const [isTesting, setIsTesting] = useState(false);
   const [testSuccess, setTestSuccess] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
 
   useEffect(() => {
     // Load saved settings
     const savedChannel = localStorage.getItem('slack-channel') || 'sensei-approvals';
-    const savedEnabled = localStorage.getItem('slack-enabled') === 'true';
 
     // Load credentials
     const savedBotToken = apiKeyService.getKey('slack-bot-token') || '';
@@ -39,18 +39,48 @@ export const SlackSettings: React.FC<SlackSettingsProps> = ({ onClose }) => {
     setAppToken(savedAppToken);
     setChannel(savedChannel);
 
-    // Check if actually connected via the service (this is the source of truth)
-    const isConnected = slackService.isEnabled();
-    setEnabled(isConnected);
-    setConnectionStatus(isConnected ? 'connected' : 'disconnected');
+    // Poll for Slack status
+    const checkStatus = async () => {
+      try {
+        const status = await slackService.getStatus();
+        // Service is connected if it's running AND initialized with credentials
+        const isConnected = status?.service_running && status?.initialized;
+        setEnabled(isConnected);
+        setConnectionStatus(isConnected ? 'connected' : 'disconnected');
+      } catch (error) {
+        setEnabled(false);
+        setConnectionStatus('disconnected');
+      }
+    };
+
+    // Check immediately
+    checkStatus();
+
+    // Poll every 3 seconds
+    const interval = setInterval(checkStatus, 3000);
+
+    return () => clearInterval(interval);
   }, []);
 
   const handleSaveCredentials = () => {
+    console.log('💾 Saving Slack credentials...', {
+      botToken: botToken ? `${botToken.substring(0, 10)}...` : 'empty',
+      signingSecret: signingSecret ? 'present' : 'empty',
+      appToken: appToken ? `${appToken.substring(0, 10)}...` : 'empty',
+      channel
+    });
+
     // Save credentials to API key service
     apiKeyService.setKey('slack-bot-token', botToken);
     apiKeyService.setKey('slack-signing-secret', signingSecret);
     apiKeyService.setKey('slack-app-token', appToken);
     localStorage.setItem('slack-channel', channel);
+
+    // Show success feedback
+    setSaveSuccess(true);
+    setTimeout(() => setSaveSuccess(false), 2000);
+
+    console.log('✅ Credentials saved to storage');
   };
 
   const handleToggleSlack = async () => {
@@ -340,10 +370,21 @@ export const SlackSettings: React.FC<SlackSettingsProps> = ({ onClose }) => {
           {/* Save Credentials Button */}
           <button
             onClick={handleSaveCredentials}
-            className="px-4 py-2 bg-blue-500 text-white border-2 border-black rounded-lg shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] hover:bg-blue-600 transition-all font-bold flex items-center gap-2"
+            className={`px-4 py-2 text-white border-2 border-black rounded-lg shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] hover:shadow-[1px_1px_0px_0px_rgba(0,0,0,1)] transition-all font-bold flex items-center gap-2 ${
+              saveSuccess ? 'bg-green-500 hover:bg-green-600' : 'bg-blue-500 hover:bg-blue-600'
+            }`}
           >
-            <Save className="h-4 w-4" strokeWidth={2.5} />
-            Save Credentials
+            {saveSuccess ? (
+              <>
+                <CheckCircle className="h-4 w-4" strokeWidth={2.5} />
+                Saved!
+              </>
+            ) : (
+              <>
+                <Save className="h-4 w-4" strokeWidth={2.5} />
+                Save Credentials
+              </>
+            )}
           </button>
         </div>
 

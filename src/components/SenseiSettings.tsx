@@ -87,9 +87,10 @@ export const SenseiSettings: React.FC<SenseiSettingsProps> = ({
     enabled: false,
     model: 'gpt-5',
     systemPrompt: DEFAULT_PROMPTS.general,
-    autoExecute: false,
+    autoApprove: true,
     temperature: 1,
     maxTokens: 5000,
+    confidenceThreshold: 0.8,
   });
   const [isSaving, setIsSaving] = useState(false);
   const [selectedPromptTemplate, setSelectedPromptTemplate] = useState('general');
@@ -104,9 +105,10 @@ export const SenseiSettings: React.FC<SenseiSettingsProps> = ({
           model: session.config.model || 'gpt-5',
           // Only use default prompt if systemPrompt is undefined, preserve empty strings
           systemPrompt: session.config.systemPrompt !== undefined ? session.config.systemPrompt : DEFAULT_PROMPTS.general,
-          autoExecute: session.config.autoExecute ?? false,
+          autoApprove: session.config.autoApprove ?? false,
           temperature: session.config.temperature ?? 1,
           maxTokens: session.config.maxTokens || 5000,
+          confidenceThreshold: session.config.confidenceThreshold ?? 0.8,
         });
         // Detect which template is being used (if any)
         const matchingTemplate = Object.entries(DEFAULT_PROMPTS).find(
@@ -123,9 +125,10 @@ export const SenseiSettings: React.FC<SenseiSettingsProps> = ({
           enabled: false,
           model: 'gpt-5',
           systemPrompt: DEFAULT_PROMPTS.general,
-          autoExecute: false,
+          autoApprove: true,
           temperature: 1,
           maxTokens: 5000,
+          confidenceThreshold: 0.8,
         });
         setSelectedPromptTemplate('general');
       }
@@ -225,35 +228,89 @@ export const SenseiSettings: React.FC<SenseiSettingsProps> = ({
             <div className="space-y-4">
               <div className="flex items-center justify-between p-3 bg-gray-100 rounded-lg border-2 border-gray-300">
                 <div>
-                  <label className="text-sm font-medium text-black">Auto-Execute Commands</label>
+                  <label className="text-sm font-medium text-black">Auto-Approve Recommendations</label>
                   <p className="text-xs text-gray-600 mt-1">
-                    Automatically execute high-confidence recommendations
+                    Automatically approve high-confidence recommendations
                   </p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setConfig({ ...config, autoExecute: !config.autoExecute })}
+                  onClick={() => setConfig({ ...config, autoApprove: !config.autoApprove })}
                   className={`relative w-12 h-6 rounded-full transition-all border-2 border-black ${
-                    config.autoExecute ? 'bg-green-400' : 'bg-gray-300'
+                    config.autoApprove ? 'bg-green-400' : 'bg-gray-300'
                   }`}
                 >
                   <div
                     className={`absolute top-0.5 h-4 w-4 bg-black rounded-full transition-transform ${
-                      config.autoExecute ? 'translate-x-6' : 'translate-x-0.5'
+                      config.autoApprove ? 'translate-x-6' : 'translate-x-0.5'
                     }`}
                   />
                 </button>
               </div>
 
-              {config.autoExecute && (
+              {config.autoApprove && (
                 <div className="p-3 bg-yellow-100 border-2 border-yellow-600 rounded-lg">
                   <div className="flex items-start gap-2">
                     <AlertTriangle className="h-4 w-4 text-yellow-700 mt-0.5" strokeWidth={2.5} />
                     <div className="text-xs text-yellow-900">
-                      <p className="font-bold mb-1">Warning: Auto-execution enabled</p>
-                      <p>Commands with confidence above 70% will be executed automatically. Only enable this if you trust the AI's recommendations.</p>
+                      <p className="font-bold mb-1">Warning: Auto-approve enabled</p>
+                      <p>Recommendations with confidence above {Math.round((config.confidenceThreshold || 0.8) * 100)}% will be approved automatically and sent to the agent. Only enable this if you trust the AI's recommendations.</p>
                     </div>
                   </div>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Confidence Threshold: {Math.round((config.confidenceThreshold || 0.8) * 100)}%
+                </label>
+                <input
+                  type="range"
+                  value={config.confidenceThreshold || 0.8}
+                  onChange={(e) => setConfig({ ...config, confidenceThreshold: parseFloat(e.target.value) })}
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-purple-600"
+                  style={{
+                    background: `linear-gradient(to right, #9333ea 0%, #9333ea ${(config.confidenceThreshold || 0.8) * 100}%, #e5e7eb ${(config.confidenceThreshold || 0.8) * 100}%, #e5e7eb 100%)`
+                  }}
+                />
+                <div className="flex justify-between text-xs text-gray-600 mt-1">
+                  <span>0% (show all)</span>
+                  <span>50%</span>
+                  <span>100% (highest only)</span>
+                </div>
+                <p className="mt-2 text-xs text-gray-600">
+                  Auto-approve recommendations with confidence above this threshold (when auto-approve is enabled)
+                </p>
+              </div>
+
+              {config.autoApprove && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Max Consecutive Auto-Approvals: {config.maxConsecutiveAutoApprovals || 5}
+                  </label>
+                  <input
+                    type="range"
+                    value={config.maxConsecutiveAutoApprovals || 5}
+                    onChange={(e) => setConfig({ ...config, maxConsecutiveAutoApprovals: parseInt(e.target.value) })}
+                    min="1"
+                    max="20"
+                    step="1"
+                    className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-yellow-600"
+                    style={{
+                      background: `linear-gradient(to right, #ca8a04 0%, #ca8a04 ${((config.maxConsecutiveAutoApprovals || 5) - 1) / 19 * 100}%, #e5e7eb ${((config.maxConsecutiveAutoApprovals || 5) - 1) / 19 * 100}%, #e5e7eb 100%)`
+                    }}
+                  />
+                  <div className="flex justify-between text-xs text-gray-600 mt-1">
+                    <span>1 (very safe)</span>
+                    <span>10</span>
+                    <span>20 (less safe)</span>
+                  </div>
+                  <p className="mt-2 text-xs text-gray-600">
+                    Maximum number of recommendations that can be auto-approved in a row. After this limit, manual approval is required to reset the counter. This is a safety mechanism to prevent runaway auto-approvals.
+                  </p>
                 </div>
               )}
 

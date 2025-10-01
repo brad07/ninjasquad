@@ -12,6 +12,7 @@ import type {
 // Import plugin definitions
 import { OpenCodePlugin } from '../plugins/opencode';
 import { ClaudeCodePlugin } from '../plugins/claude-code';
+import { ClaudeAgentDirectPlugin } from '../plugins/claude-agent-direct';
 
 class PluginService {
   private plugins: Map<string, CodingAgentPlugin> = new Map();
@@ -29,12 +30,11 @@ class PluginService {
   private initializePlugins() {
     // Register built-in plugins
     this.registerPlugin(OpenCodePlugin);
-    this.registerPlugin(ClaudeCodePlugin);
+    this.registerPlugin(ClaudeCodePlugin); // CLI-based
+    this.registerPlugin(ClaudeAgentDirectPlugin); // Direct SDK
 
-    // Default to Claude Code
-    if (!this.activePluginId) {
-      this.activePluginId = 'claude-code';
-    }
+    // Always default to Claude Code (CLI-based) regardless of registration order
+    this.activePluginId = 'claude-code';
   }
 
   /**
@@ -133,13 +133,18 @@ class PluginService {
     this.pluginSettings.set(pluginId, newSettings);
     this.saveSettings();
 
-    // Initialize plugin with new settings
-    const settingsMap: Record<string, string> = {};
-    if (newSettings.apiKey) settingsMap.api_key = newSettings.apiKey;
-    if (newSettings.model) settingsMap.model = newSettings.model;
-    if (newSettings.customEndpoint) settingsMap.endpoint = newSettings.customEndpoint;
+    // Try to initialize plugin with new settings (optional, for future backend integration)
+    try {
+      const settingsMap: Record<string, string> = {};
+      if (newSettings.apiKey) settingsMap.api_key = newSettings.apiKey;
+      if (newSettings.model) settingsMap.model = newSettings.model;
+      if (newSettings.customEndpoint) settingsMap.endpoint = newSettings.customEndpoint;
 
-    await invoke('initialize_plugin', { pluginId, settings: settingsMap });
+      await invoke('initialize_plugin', { pluginId, settings: settingsMap });
+    } catch (error) {
+      // Command not implemented yet - settings are saved locally
+      console.log('Plugin backend initialization not available, using local settings');
+    }
   }
 
   /**

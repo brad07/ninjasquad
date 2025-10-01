@@ -57,8 +57,11 @@ impl PluginManager {
     /// Set the active plugin
     pub async fn set_active_plugin(&self, plugin_id: &str) -> Result<(), String> {
         let plugins = self.plugins.read().await;
+
+        // Allow setting plugins that aren't registered (e.g., frontend-only plugins)
+        // This is fine because frontend plugins handle their own execution
         if !plugins.contains_key(plugin_id) {
-            return Err(format!("Plugin '{}' not found", plugin_id));
+            println!("Warning: Setting active plugin '{}' which is not registered in backend (frontend-only plugin)", plugin_id);
         }
 
         let mut active = self.active_plugin.write().await;

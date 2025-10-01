@@ -25,18 +25,44 @@ export const Projects: React.FC = () => {
   }, []);
 
   const loadProjects = async () => {
+    console.log('[Projects] Starting loadProjects...');
     setLoading(true);
     try {
-      const [allProjects, recent, favorites] = await Promise.all([
-        projectsService.listProjects(),
-        projectsService.listRecentProjects(5),
-        projectsService.listFavoriteProjects()
-      ]);
+      // Load projects individually with fallback to avoid Promise.all failure
+      let allProjects = [];
+      let recent = [];
+      let favorites = [];
+
+      try {
+        console.log('[Projects] Calling listProjects...');
+        allProjects = await projectsService.listProjects();
+        console.log('[Projects] listProjects succeeded:', allProjects.length, 'projects');
+      } catch (error) {
+        console.error('[Projects] Failed to load all projects:', error);
+      }
+
+      try {
+        console.log('[Projects] Calling listRecentProjects...');
+        recent = await projectsService.listRecentProjects(5);
+        console.log('[Projects] listRecentProjects succeeded:', recent.length, 'projects');
+      } catch (error) {
+        console.error('[Projects] Failed to load recent projects:', error);
+      }
+
+      try {
+        console.log('[Projects] Calling listFavoriteProjects...');
+        favorites = await projectsService.listFavoriteProjects();
+        console.log('[Projects] listFavoriteProjects succeeded:', favorites.length, 'projects');
+      } catch (error) {
+        console.error('[Projects] Failed to load favorite projects:', error);
+      }
+
       setProjects(allProjects);
       setRecentProjects(recent);
       setFavoriteProjects(favorites);
+      console.log('[Projects] State updated successfully');
     } catch (error) {
-      console.error('Failed to load projects:', error);
+      console.error('[Projects] Failed to load projects:', error);
     } finally {
       setLoading(false);
     }
@@ -50,16 +76,38 @@ export const Projects: React.FC = () => {
   };
 
   const handleCreateProject = async () => {
-    if (!newProjectName || !newProjectPath) return;
+    console.log('handleCreateProject called', { newProjectName, newProjectPath, newProjectDescription });
 
+    if (!newProjectName || !newProjectPath) {
+      console.log('Missing required fields - returning early');
+      return;
+    }
+
+    console.log('Starting project creation...');
     try {
       // Check if project already exists at this path
       const exists = await projectsService.projectExists(newProjectPath);
+      console.log('Project exists check:', exists);
       if (exists) {
         const existing = await projectsService.getProjectByPath(newProjectPath);
+        console.log('Existing project:', existing);
         if (existing) {
-          alert('A project already exists at this location.');
-          return;
+          const shouldDelete = confirm(
+            `A project named "${existing.name}" already exists at this location.\n\n` +
+            `Do you want to delete it and create a new one?\n\n` +
+            `Click OK to delete and continue, or Cancel to keep it.`
+          );
+
+          if (shouldDelete) {
+            await projectsService.deleteProject(existing.id);
+            console.log('Deleted existing project:', existing.id);
+          } else {
+            // User canceled - switch to "All Projects" tab and refresh to show the existing project
+            setActiveTab('all');
+            await loadProjects();
+            setShowNewProjectDialog(false);
+            return;
+          }
         }
       }
 
@@ -91,6 +139,12 @@ export const Projects: React.FC = () => {
   const handleDeleteProject = async (id: string) => {
     if (confirm('Are you sure you want to delete this project?')) {
       await projectsService.deleteProject(id);
+
+      // Clean up localStorage for this project's plugin instances
+      localStorage.removeItem(`plugin-instances-${id}`);
+      localStorage.removeItem(`plugin-active-instance-${id}`);
+      console.log('[Projects] Cleaned up localStorage for deleted project:', id);
+
       await loadProjects();
     }
   };

@@ -39,6 +39,9 @@ export interface PluginCapabilities {
 export interface CodingAgentPlugin extends PluginConfig {
   id: string;
 
+  // Plugin visibility
+  enabled?: boolean; // If false, plugin won't appear in selector (default: true)
+
   // UI Component configuration
   customRenderer?: ComponentType<PluginUIProps>;
   customStyles?: string;
@@ -73,27 +76,75 @@ export interface PluginUIProps {
 
 /**
  * Interface for plugins to integrate with Sensei
- * Plugins should call senseiService.addAgentRecommendation()
- * when they have actionable responses to share
+ *
+ * ARCHITECTURE: Plugin-Sensei Communication Pattern
+ * ================================================
+ *
+ * We use a session-scoped EventBus for all plugin-Sensei communication.
+ * This provides:
+ * - Type safety for event payloads
+ * - Session isolation (events only go to relevant listeners)
+ * - No global namespace pollution
+ * - Easy debugging and event flow tracking
+ *
+ * HOW IT WORKS:
+ * -------------
+ * 1. Plugin sends agent response to Sensei for analysis:
+ *    ```typescript
+ *    import { senseiService } from '../services/SenseiService';
+ *
+ *    // After agent completes a response
+ *    await senseiService.addAgentRecommendation(
+ *      serverId,
+ *      sessionId,
+ *      agentResponse,
+ *      'your-plugin-name'
+ *    );
+ *    ```
+ *
+ * 2. Plugin listens for approved recommendations using EventBus:
+ *    ```typescript
+ *    import { onSenseiApproved } from '../services/EventBus';
+ *
+ *    useEffect(() => {
+ *      if (!session?.id) return;
+ *
+ *      const unsubscribe = onSenseiApproved(session.id, (data) => {
+ *        // Handle approved recommendation
+ *        console.log('Approved:', data.recommendation);
+ *        // Send back to agent for execution
+ *      });
+ *
+ *      return unsubscribe; // Cleanup on unmount
+ *    }, [session?.id]);
+ *    ```
+ *
+ * AVAILABLE EVENTS:
+ * ----------------
+ * - sensei-recommendation: New recommendation from Sensei
+ * - sensei-approved: User/auto-approved recommendation
+ * - sensei-analyzing: Sensei is analyzing (start/stop)
+ * - sensei-execute: Execute a command
+ * - agent-response: Agent completed a response (for future use)
+ *
+ * See EventBus.ts for full type definitions and helper functions.
  */
 export interface SenseiIntegration {
   /**
-   * Add an agent response to Sensei as a recommendation
+   * Add an agent response to Sensei for analysis
+   * Sensei will analyze the response and generate recommendations
+   *
    * @param serverId The server ID (e.g., 'opencode-4097')
    * @param sessionId The session ID
-   * @param userInput What the user asked
-   * @param agentResponse The agent's response
+   * @param agentResponse The agent's response to analyze
    * @param agentName Name of the agent (e.g., 'claude-code', 'copilot', 'cursor')
-   * @param confidence Confidence level 0-1 (default: 0.95 for AI agents)
    */
   addRecommendation(
     serverId: string,
     sessionId: string,
-    userInput: string,
     agentResponse: string,
-    agentName: string,
-    confidence?: number
-  ): void;
+    agentName: string
+  ): Promise<void>;
 }
 
 /**
@@ -213,5 +264,6 @@ export interface PluginSettings {
   temperature?: number;
   maxTokens?: number;
   customEndpoint?: string;
+  timeout?: number; // Timeout in seconds for agent responses
   additionalSettings?: Record<string, any>;
 }

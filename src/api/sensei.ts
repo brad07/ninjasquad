@@ -18,6 +18,11 @@ export interface SenseiAnalysisResponse {
   recommendation: string;
   command?: string;
   confidence: number;
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+  };
 }
 
 export class SenseiAPI {
@@ -42,16 +47,19 @@ export class SenseiAPI {
       };
     }
 
+    // Reasoning models (like GPT-5/o1 models) don't support temperature
+    const isReasoningModel = request.model.includes('gpt-5') ||
+                             request.model.includes('o1-preview') ||
+                             request.model.includes('o1-mini');
+
     try {
       // Configure OpenAI with the provided API key
       const openai = createOpenAI({
         apiKey: request.apiKey,
       });
 
-      // Reasoning models (like GPT-5/o1 models) don't support temperature
-      const isReasoningModel = request.model.includes('gpt-5') ||
-                               request.model.includes('o1-preview') ||
-                               request.model.includes('o1-mini');
+      // Reasoning models need much longer timeouts (can take 5+ minutes)
+      const timeout = isReasoningModel ? 600000 : 120000; // 10 minutes for reasoning, 2 minutes for others
 
       // Build generation params based on model capabilities
       const generationParams: any = {
@@ -60,7 +68,7 @@ export class SenseiAPI {
         prompt: `Analyze this recent terminal output and provide a recommendation:\n\n${request.output}`,
         maxRetries: 3,
         maxTokens: request.maxTokens,
-        abortSignal: AbortSignal.timeout(120000), // 120 second timeout
+        abortSignal: AbortSignal.timeout(timeout),
       };
 
       // Only add temperature for non-reasoning models
@@ -70,6 +78,13 @@ export class SenseiAPI {
 
       const result = await generateText(generationParams);
 
+      // Extract usage information
+      const usage = result.usage ? {
+        promptTokens: result.usage.promptTokens,
+        completionTokens: result.usage.completionTokens,
+        totalTokens: result.usage.totalTokens
+      } : undefined;
+
       // Try to parse as JSON, fallback to plain text
       try {
         const parsed = JSON.parse(result.text);
@@ -77,12 +92,14 @@ export class SenseiAPI {
           recommendation: parsed.recommendation || result.text,
           command: parsed.command,
           confidence: parsed.confidence || 0.5,
+          usage
         };
       } catch {
         // If not valid JSON, treat as plain recommendation
         return {
           recommendation: result.text,
           confidence: 0.5,
+          usage
         };
       }
     } catch (error: any) {
@@ -97,6 +114,16 @@ export class SenseiAPI {
       } else if (error?.message?.includes('rate limit')) {
         return {
           recommendation: 'Rate limit reached. Please wait a moment before trying again.',
+          confidence: 0,
+        };
+      } else if (error?.message?.includes('timeout') || error?.message?.includes('timed out') || error?.name === 'TimeoutError') {
+        return {
+          recommendation: `Request timed out. ${isReasoningModel ? 'Reasoning models can take several minutes - please try again.' : 'Please try again or use a different model.'}`,
+          confidence: 0,
+        };
+      } else if (error?.message?.includes('Load failed') || error?.message?.includes('fetch')) {
+        return {
+          recommendation: 'Network error: Failed to connect to OpenAI API. Please check your internet connection and try again.',
           confidence: 0,
         };
       } else {
@@ -151,8 +178,12 @@ export class SenseiAPI {
         onChunk(chunk);
       }
 
-      // Get the full text
+      // Get the full text and usage
       const fullText = await text;
+
+      // Note: streamText doesn't provide usage stats in the same way
+      // Usage will be undefined for streaming calls
+      const usage = undefined;
 
       // Try to parse as JSON
       try {
@@ -161,11 +192,13 @@ export class SenseiAPI {
           recommendation: parsed.recommendation || fullText,
           command: parsed.command,
           confidence: parsed.confidence || 0.5,
+          usage
         };
       } catch {
         return {
           recommendation: fullText,
           confidence: 0.5,
+          usage
         };
       }
     } catch (error: any) {

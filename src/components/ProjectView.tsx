@@ -1,8 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { Plus, Server, Folder, Edit, Trash, Star, Terminal as TerminalIcon, Brain, Monitor, Zap } from 'lucide-react';
-import { Button } from '@/components/retroui/Button';
+import { Plus, Server, Folder, Edit, Trash, Star, Terminal as TerminalIcon, Brain, Monitor, Play } from 'lucide-react';
 import ClaudeIcon from './icons/ClaudeIcon';
 import type { Project } from '../types/project';
 import type { OpenCodeServer } from '../types';
@@ -14,9 +13,13 @@ import { claudeCodeSDKService } from '../services/ClaudeCodeSDKService';
 import Terminal from './Terminal';
 import SenseiPanel from './SenseiPanel';
 import SenseiSettings from './SenseiSettings';
-import PluginSelector from './PluginSelector';
 import ClaudeCodeUI from './plugins/ClaudeCodeUI';
 import type { ServerMode } from './ModeToggle';
+import { usePluginInstances } from '../hooks/usePluginInstances';
+import { PluginTabBar } from './PluginTabBar';
+import ClaudeAgentDirectUI from './plugins/ClaudeAgentDirectUI';
+import { getDevCommand, getAllScripts } from '../utils/packageManager';
+import { ollamaService } from '../services/OllamaService';
 
 interface TmuxSession {
   id: string;
@@ -36,6 +39,18 @@ interface ProjectViewProps {
 }
 
 const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDelete }) => {
+  // Plugin instance management
+  const {
+    instances: pluginInstances,
+    activeInstanceId,
+    createInstance,
+    closeInstance,
+    switchInstance,
+    updateInstanceTitle,
+    getActiveInstance,
+    getInstancesList
+  } = usePluginInstances(project.id, project.path);
+
   const [servers, setServers] = useState<OpenCodeServer[]>([]);
   const [isSpawning, setIsSpawning] = useState(false);
   const [port, setPort] = useState(4097);
@@ -81,16 +96,38 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
   }>>([]);
   const [workingDisappearedTime, setWorkingDisappearedTime] = useState<number | null>(null);
   const [activePlugin, setActivePlugin] = useState<any>(null);
-  const [showClaudeCode, setShowClaudeCode] = useState(false);
-  const [claudeSessionId, setClaudeSessionId] = useState<string | null>(() => {
-    // Restore session ID from localStorage if it exists
-    const savedSessionId = localStorage.getItem(`claude-session-${project.id}`);
-    if (savedSessionId) {
-      console.log('Restored Claude session from localStorage:', savedSessionId);
-    }
-    return savedSessionId;
+  // Track session IDs per plugin
+  const [pluginSessions, setPluginSessions] = useState<Record<string, string>>(() => {
+    // Restore plugin sessions from localStorage
+    const saved = localStorage.getItem(`plugin-sessions-${project.id}`);
+    const sessions = saved ? JSON.parse(saved) : {};
+    console.log('[RESTORE] Step 1 - Plugin sessions from localStorage:', sessions);
+    return sessions;
   });
-  const [activeSessionTab, setActiveSessionTab] = useState<string | null>(null);
+  // Legacy support - keep claudeSessionId for backward compatibility
+  const claudeSessionId = pluginSessions['claude-code'] || pluginSessions['claude-agent-direct'] || null;
+  const [activeSessionTab, setActiveSessionTab] = useState<string | null>(() => {
+    // Restore active tab from localStorage
+    const saved = localStorage.getItem(`active-tab-${project.id}`);
+    console.log('[RESTORE] Step 2 - Active tab from localStorage:', saved);
+    return saved;
+  });
+  const [showClaudeCode, setShowClaudeCode] = useState(() => {
+    // Show Claude Code UI if we have a restored Claude session
+    const savedSessionId = localStorage.getItem(`claude-session-${project.id}`);
+    const savedTab = localStorage.getItem(`active-tab-${project.id}`);
+
+    // If we have a session but no saved tab, we should still show it
+    const shouldShow = !!savedSessionId && (!savedTab || savedTab === `claude-${savedSessionId}`);
+
+    console.log('[RESTORE] Step 3 - Initializing showClaudeCode:', {
+      savedSessionId,
+      savedTab,
+      expectedTab: savedSessionId ? `claude-${savedSessionId}` : null,
+      shouldShow
+    });
+    return shouldShow;
+  });
   const [pendingSenseiCount, setPendingSenseiCount] = useState<number>(0);
   const autoRefreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const workingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -99,7 +136,29 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
   const lastSeenLinesRef = useRef<number>(0); // Track how many lines we've processed for accumulation
   const LLM_RATE_LIMIT_MS = 60000; // 1 minute between calls
 
+  // Dev Server state
+  const [devServerLogs, setDevServerLogs] = useState<string[]>([]);
+  const [devServerRunning, setDevServerRunning] = useState(false);
+  const [devServerPid, setDevServerPid] = useState<number | null>(null);
+  const [showDevServerModal, setShowDevServerModal] = useState(false);
+  const [devServerCommand, setDevServerCommand] = useState<string>('');
+  const [devServerPort, setDevServerPort] = useState<number>(() => Math.floor(Math.random() * (3100 - 3010 + 1)) + 3010);
+  const [devServerLoading, setDevServerLoading] = useState(false);
+  const [availableScripts, setAvailableScripts] = useState<Record<string, string>>({});
+  const [selectedScript, setSelectedScript] = useState<string>('');
+  const [launchPlaywright, setLaunchPlaywright] = useState(true);
+  const [playwrightHeadless, setPlaywrightHeadless] = useState(false);
+  const [detectedUrl, setDetectedUrl] = useState<string | null>(null);
+  const [browserOpened, setBrowserOpened] = useState(false);
+  const serverIdRef = useRef<string>(`dev-server-${Date.now()}`);
+
   useEffect(() => {
+    console.log('[RESTORE] Step 4 - Mount effect running', {
+      claudeSessionId,
+      activeSessionTab,
+      showClaudeCode
+    });
+
     // Check active plugin
     const active = pluginService.getActivePlugin();
     setActivePlugin(active);
@@ -124,11 +183,154 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
     if (savedTimeout) {
       setSenseiTimeout(parseInt(savedTimeout, 10));
     }
+
+    // Restore plugin sessions if any exist
+    if (claudeSessionId) {
+      console.log('[RESTORE] Step 5 - Restoring plugin session:', claudeSessionId, 'for active plugin:', active?.id);
+
+      // If no active tab is set, set it now
+      if (!activeSessionTab) {
+        const tabId = `claude-${claudeSessionId}`;
+        console.log('[RESTORE] Step 6 - No active tab found, setting to:', tabId);
+        setActiveSessionTab(tabId);
+        setShowClaudeCode(true);
+      } else if (activeSessionTab === `claude-${claudeSessionId}`) {
+        console.log('[RESTORE] Step 6 - Making plugin session active');
+        setShowClaudeCode(true);
+      } else {
+        console.log('[RESTORE] Step 6 - Active tab does not match plugin session', {
+          activeSessionTab,
+          expected: `claude-${claudeSessionId}`
+        });
+      }
+
+      // Verify the session still exists in the service (only for Claude Code plugin)
+      if (active?.id === 'claude-code') {
+        const existingSession = claudeCodeSDKService.getSession(claudeSessionId);
+        console.log('[RESTORE] Step 7 - Session exists in Claude Code service:', !!existingSession);
+        if (!existingSession) {
+          console.log('[RESTORE] Session not found in service, will need to reconnect');
+          // The session will be re-registered when the user interacts with it
+        }
+      } else {
+        console.log('[RESTORE] Step 7 - Plugin', active?.id, 'will handle session validation internally');
+      }
+    } else {
+      console.log('[RESTORE] Step 5 - No plugin sessions to restore');
+    }
+    // Tmux session restoration is handled in loadTmuxSessions()
   }, [project.id]);
 
   // Claude Code now directly adds recommendations via senseiService.addClaudeCodeRecommendation()
   // No need for event listener anymore
 
+  // Dev Server event listeners
+  useEffect(() => {
+    // Use refs to track browser state to avoid recreating listeners
+    const browserOpenedRef = { current: false };
+    const detectedUrlRef = { current: null as string | null };
+
+    const handleDevServerLine = (line: string) => {
+      setDevServerLogs(prev => [...prev, line]);
+
+      // Feed output to Ollama service for analysis if enabled
+      const ollamaConfig = ollamaService.getConfig();
+      if (ollamaConfig.enabled) {
+        ollamaService.addOutput(serverIdRef.current, line);
+      }
+
+      // Try to detect server URL and launch Playwright if enabled (only from stdout)
+      if (launchPlaywright && !detectedUrlRef.current && !browserOpenedRef.current) {
+        const urlPatterns = [
+          /(?:Local|http):?\s+(?:https?:\/\/)?([^\s]+)/i,
+          /(?:running|listening) (?:at|on):?\s*(?:https?:\/\/)?([^\s]+)/i,
+          /Server (?:started|running) (?:at|on):?\s*(?:https?:\/\/)?([^\s]+)/i,
+          /(https?:\/\/localhost:\d+)/i,
+          /(https?:\/\/127\.0\.0\.1:\d+)/i,
+        ];
+
+        for (const pattern of urlPatterns) {
+          const match = line.match(pattern);
+          if (match) {
+            let url = match[1] || match[0];
+            if (!url.startsWith('http')) {
+              url = 'http://' + url;
+            }
+            console.log('[DevServer] Detected URL:', url);
+            detectedUrlRef.current = url;
+            browserOpenedRef.current = true;
+            setDetectedUrl(url);
+            setBrowserOpened(true);
+
+            // Launch Playwright browser
+            setTimeout(async () => {
+              try {
+                console.log('[DevServer] Launching Playwright browser with headless:', playwrightHeadless);
+                await invoke('launch_playwright_browser', {
+                  url,
+                  headless: playwrightHeadless
+                });
+                console.log('[DevServer] Playwright browser opened successfully');
+              } catch (error) {
+                console.error('[DevServer] Failed to open Playwright browser:', error);
+              }
+            }, 1000);
+            break;
+          }
+        }
+      }
+    };
+
+    const unlistenOutput = listen<string>('dev-server-output', (event) => {
+      handleDevServerLine(event.payload);
+    });
+
+    const unlistenError = listen<string>('dev-server-error', (event) => {
+      const errorLine = `[ERROR] ${event.payload}`;
+      handleDevServerLine(errorLine);
+    });
+
+    return () => {
+      unlistenOutput.then(fn => fn());
+      unlistenError.then(fn => fn());
+    };
+  }, [launchPlaywright, playwrightHeadless]);
+
+  // Load available scripts when modal opens
+  useEffect(() => {
+    if (showDevServerModal) {
+      const loadScripts = async () => {
+        try {
+          const scripts = await getAllScripts(project.path);
+          setAvailableScripts(scripts);
+
+          // Auto-detect dev command
+          const detectedCommand = await getDevCommand(project.path);
+          if (detectedCommand && !devServerCommand) {
+            setDevServerCommand(detectedCommand);
+            // Extract script name from command like "npm run dev"
+            const scriptName = detectedCommand.split(' ').pop();
+            if (scriptName) {
+              setSelectedScript(scriptName);
+            }
+          }
+        } catch (error) {
+          console.error('Failed to load scripts:', error);
+        }
+      };
+      loadScripts();
+    }
+  }, [showDevServerModal, project.path]);
+
+  // Save active tab to localStorage whenever it changes
+  useEffect(() => {
+    if (activeSessionTab) {
+      localStorage.setItem(`active-tab-${project.id}`, activeSessionTab);
+      console.log('Saved active tab to localStorage:', activeSessionTab);
+    } else {
+      localStorage.removeItem(`active-tab-${project.id}`);
+    }
+  }, [activeSessionTab, project.id]);
 
 
   useEffect(() => {
@@ -462,8 +664,22 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
       const projectSessions = sessions.filter(s => s.project_path === project.path);
       setTmuxSessions(projectSessions);
 
-      // Auto-select first session if available
-      if (projectSessions.length > 0 && !activeTmuxSession) {
+      // Restore previously active tmux session if available
+      const savedTab = localStorage.getItem(`active-tab-${project.id}`);
+      if (savedTab && savedTab.startsWith('tmux-')) {
+        const savedSessionId = savedTab.replace('tmux-', '');
+        const savedSession = projectSessions.find(s => s.id === savedSessionId);
+        if (savedSession) {
+          console.log('Restoring tmux session:', savedSessionId);
+          setActiveTmuxSession(savedSession);
+          setShowClaudeCode(false);
+          await captureTmuxContent(savedSession.id);
+          return;
+        }
+      }
+
+      // Auto-select first session if available and no saved session
+      if (projectSessions.length > 0 && !activeTmuxSession && !claudeSessionId) {
         setActiveTmuxSession(projectSessions[0]);
         await captureTmuxContent(projectSessions[0].id);
       }
@@ -473,47 +689,76 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
   };
 
   const spawnTmuxSession = async () => {
-    // Check if Claude Code is the active plugin
+    // Check if Claude Code or Claude Agent Direct is the active plugin
     const active = pluginService.getActivePlugin();
-    if (active?.id === 'claude-code') {
-      // For Claude Code, open the chat interface instead of tmux
+    if (active?.id === 'claude-code' || active?.id === 'claude-agent-direct') {
+      // For Claude plugins, open the chat interface instead of tmux
       setShowClaudeCode(true);
-      // Initialize Claude Code session if needed
-      if (!claudeSessionId) {
+      // Check if this plugin already has a session
+      const existingSessionId = pluginSessions[active.id];
+      if (!existingSessionId) {
         try {
-          const sessionId = await claudeCodeSDKService.createSession(undefined, project.path);
-          setClaudeSessionId(sessionId);
-          // Persist session ID to localStorage
-          localStorage.setItem(`claude-session-${project.id}`, sessionId);
-          console.log('Saved Claude session to localStorage:', sessionId);
+          // Use Claude Code SDK for claude-code plugin only
+          // Claude Agent Direct will create its own session internally
+          let sessionId: string;
+          if (active.id === 'claude-code') {
+            sessionId = await claudeCodeSDKService.createSession(undefined, project.path);
+          } else {
+            // For Claude Agent Direct, just generate a unique session ID
+            // The actual session will be created by ClaudeAgentDirectUI
+            sessionId = `claude-agent-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+          }
 
-          setActiveSessionTab(`claude-${sessionId}`); // Set active tab for Claude
+          console.log('[SESSION] Created new session ID for', active.id, ':', sessionId);
+
+          // Update plugin sessions
+          const updatedSessions = { ...pluginSessions, [active.id]: sessionId };
+          setPluginSessions(updatedSessions);
+
+          // Persist all sessions to localStorage
+          localStorage.setItem(`plugin-sessions-${project.id}`, JSON.stringify(updatedSessions));
+          console.log('[SESSION] Saved sessions to localStorage:', updatedSessions);
+
+          const tabId = `claude-${sessionId}`;
+          console.log('[SESSION] Setting active tab:', tabId);
+          setActiveSessionTab(tabId); // Set active tab for Claude
           setNotification({
-            message: `Claude Code session started in ${project.path}`,
+            message: `${active.name} session started in ${project.path}`,
             type: 'success'
           });
         } catch (error) {
-          console.error('Failed to create Claude Code session:', error);
+          console.error(`Failed to create ${active.name} session:`, error);
           setNotification({
-            message: `Failed to start Claude Code: ${error}`,
+            message: `Failed to start ${active.name}: ${error}`,
             type: 'error'
           });
         }
       } else {
         // Using existing session (either from state or localStorage)
-        setActiveSessionTab(`claude-${claudeSessionId}`); // Activate existing Claude session
-        // Ensure it's still registered in the service
-        const existingSession = claudeCodeSDKService.getSession(claudeSessionId);
-        if (!existingSession) {
-          console.log('Re-registering restored session:', claudeSessionId);
-          // Create a new session and get the new ID from backend
-          const newSessionId = await claudeCodeSDKService.createSession(undefined, project.path);
-          setClaudeSessionId(newSessionId);
-          // Update localStorage with new session ID
-          localStorage.setItem(`claude-session-${project.id}`, newSessionId);
-          console.log('Updated session ID from', claudeSessionId, 'to', newSessionId);
-          setActiveSessionTab(`claude-${newSessionId}`);
+        const existingPluginSession = pluginSessions[active.id];
+        console.log('[SESSION] Using existing session for', active.id, ':', existingPluginSession);
+
+        setActiveSessionTab(`claude-${existingPluginSession}`); // Activate existing plugin session
+
+        // For Claude Code, ensure it's still registered in the service
+        if (active.id === 'claude-code') {
+          const existingSession = claudeCodeSDKService.getSession(existingPluginSession);
+          if (!existingSession) {
+            console.log('Re-registering restored session:', existingPluginSession);
+            // Create a new session and get the new ID from backend
+            const newSessionId = await claudeCodeSDKService.createSession(undefined, project.path);
+
+            // Update plugin sessions
+            const updatedSessions = { ...pluginSessions, [active.id]: newSessionId };
+            setPluginSessions(updatedSessions);
+
+            // Update localStorage with new session ID
+            localStorage.setItem(`plugin-sessions-${project.id}`, JSON.stringify(updatedSessions));
+            console.log('Updated session ID from', existingPluginSession, 'to', newSessionId);
+            setActiveSessionTab(`claude-${newSessionId}`);
+          }
         }
+        // For Claude Agent Direct, the session will be validated/created by ClaudeAgentDirectUI
       }
       return;
     }
@@ -1165,6 +1410,66 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
     onEdit({ ...project, isFavorite: !project.isFavorite });
   };
 
+  // Dev Server handlers
+  const handleLaunchDevServer = async () => {
+    setDevServerLoading(true);
+    try {
+      const commandToRun = devServerCommand.trim() || await getDevCommand(project.path);
+      if (!commandToRun) {
+        alert('No dev command detected. Please configure a dev command in your package.json');
+        return;
+      }
+
+      const commandWithPort = `PORT=${devServerPort} ${commandToRun}`;
+      console.log('Launching dev server:', commandWithPort);
+
+      // Clear logs and reset state
+      setDevServerLogs([]);
+      setDetectedUrl(null);
+      setBrowserOpened(false);
+
+      // Initialize Ollama session if enabled
+      const ollamaConfig = ollamaService.getConfig();
+      if (ollamaConfig.enabled) {
+        const activeInstance = getActiveInstance();
+        console.log('[DevServer] Initializing Ollama session:', {
+          serverId: serverIdRef.current,
+          activeInstance: activeInstance?.id,
+          sessionId: activeInstance?.sessionId
+        });
+        ollamaService.getOrCreateSession(
+          serverIdRef.current,
+          project.path,
+          project.name,
+          activeInstance?.sessionId
+        );
+      }
+
+      const pid = await invoke<number>('spawn_dev_server', {
+        command: commandWithPort,
+        workingDir: project.path
+      });
+
+      setDevServerPid(pid);
+      setDevServerRunning(true);
+      setShowDevServerModal(false);
+    } catch (error) {
+      console.error('Failed to launch dev server:', error);
+      alert(`Failed to launch dev server: ${error}`);
+    } finally {
+      setDevServerLoading(false);
+    }
+  };
+
+  const handleStopDevServer = () => {
+    setDevServerRunning(false);
+    setDevServerPid(null);
+  };
+
+  const handleClearDevServerLogs = () => {
+    setDevServerLogs([]);
+  };
+
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Notification */}
@@ -1178,188 +1483,119 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
         </div>
       )}
 
-      {/* Agent Controls - Combined Plugin Selector and Session Button */}
-      <div className="bg-white border-b border-gray-200 p-4 flex-shrink-0">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center space-x-3">
-            <PluginSelector />
-            <Button
-              onClick={spawnTmuxSession}
-              disabled={isSpawningTmux}
-              variant="default"
-              className="font-bold shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all border-2 border-black bg-yellow-400 hover:bg-yellow-500 text-black"
-              title={activePlugin?.id === 'claude-code' ? 'Start Claude Code chat session' : 'Start a new tmux session with OpenCode'}
-            >
-              <Zap className="mr-2 h-4 w-4" />
-              {isSpawningTmux ? 'Starting...' : 'Start Agent Session'}
-            </Button>
-          </div>
-          <div className="text-sm text-gray-600">
-            {tmuxSessions.length + (claudeSessionId ? 1 : 0)} agent {(tmuxSessions.length + (claudeSessionId ? 1 : 0)) === 1 ? 'session' : 'sessions'} running
-          </div>
-        </div>
-      </div>
+      {/* Plugin Instance Tabs - Always show to allow creating first instance */}
+      <PluginTabBar
+        instances={getInstancesList()}
+        activeInstanceId={activeInstanceId}
+        onSwitchInstance={switchInstance}
+        onCreateInstance={createInstance}
+        onCloseInstance={closeInstance}
+        onRenameInstance={updateInstanceTitle}
+      />
 
-      {/* Agent Session Tabs */}
-      {(tmuxSessions.length > 0 || claudeSessionId) && (
-        <div className="bg-white border-b border-gray-200 px-4 pt-2 flex-shrink-0">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-2 overflow-x-auto">
-            {/* Claude Code Sessions */}
-            {claudeSessionId && (
-              <button
-                className={`px-4 py-2 rounded-t-lg text-sm flex items-center space-x-2 transition-colors ${
-                  activeSessionTab === `claude-${claudeSessionId}`
-                    ? 'bg-purple-200 text-black border-2 border-black border-b-0 font-bold'
-                    : 'bg-white text-gray-700 border border-gray-300 hover:bg-purple-50 hover:text-black hover:border-black'
-                }`}
-                onClick={() => {
-                  setActiveSessionTab(`claude-${claudeSessionId}`);
-                  setShowClaudeCode(true);
-                  setActiveTmuxSession(null);
-                }}
-              >
-                <ClaudeIcon className="text-orange-600" size="16" />
-                <span>Claude Code</span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    // Clear session from localStorage when closing
-                    localStorage.removeItem(`claude-session-${project.id}`);
-                    console.log('Cleared Claude session from localStorage');
-                    setClaudeSessionId(null);
-                    setShowClaudeCode(false);
-                    if (activeSessionTab === `claude-${claudeSessionId}`) {
-                      setActiveSessionTab(null);
-                    }
-                  }}
-                  className="ml-2 text-gray-400 hover:text-red-500"
-                  title="Close session"
-                >
-                  ×
-                </button>
-              </button>
-            )}
+      {/* Plugin Instance UI */}
+      {(() => {
+        const activeInstance = getActiveInstance();
 
-            {/* Tmux Sessions */}
-            {tmuxSessions.map((session) => (
-              <button
-                key={session.id}
-                className={`px-4 py-2 rounded-t-lg text-sm flex items-center space-x-2 transition-colors ${
-                  activeSessionTab === `tmux-${session.id}`
-                    ? 'bg-purple-200 text-black border-2 border-black border-b-0 font-bold'
-                    : 'bg-white text-gray-700 border border-gray-300 hover:bg-purple-50 hover:text-black hover:border-black'
-                }`}
-                onClick={() => {
-                  setActiveSessionTab(`tmux-${session.id}`);
-                  setActiveTmuxSession(session);
-                  setShowClaudeCode(false);
-                  setAutoRefresh(true);
-                  lastKnownLineCountRef.current = 0;
-                  setTmuxOutput([]);
-                  setFullTmuxOutput([]);
-                  captureTmuxContent(session.id);
-                }}
-              >
-                <img src="/icons/opencode.svg" alt="OpenCode" className="w-4 h-4" />
-                <span>{session.id.slice(0, 12)}...</span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    killTmuxSession(session.id);
-                    if (activeSessionTab === `tmux-${session.id}`) {
-                      setActiveSessionTab(null);
-                    }
-                  }}
-                  className="ml-2 text-gray-400 hover:text-red-500"
-                  title="Kill session"
-                >
-                  ×
-                </button>
-              </button>
-            ))}
+        if (!activeInstance) {
+          return (
+            <div className="flex-1 flex items-center justify-center bg-gray-50">
+              <div className="text-center">
+                <Monitor className="h-16 w-16 text-gray-600 mx-auto mb-4" />
+                <p className="text-gray-700 text-lg mb-2">No Agent sessions</p>
+                <p className="text-gray-600 text-sm">Click "NEW" to create an agent session</p>
+              </div>
             </div>
-            {/* Sensei Toggle Button */}
-            <button
-              onClick={() => setShowSenseiPanel(!showSenseiPanel)}
-              className={`p-1.5 rounded transition-colors relative ${
-                showSenseiPanel
-                  ? 'text-blue-400 bg-blue-600/20'
-                  : 'text-gray-500 hover:text-gray-300'
-              }`}
-              title="Toggle Sensei AI Assistant"
-            >
-              <Brain className="h-4 w-4" />
-              {pendingSenseiCount > 0 && (
-                <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center font-bold">
-                  {pendingSenseiCount}
-                </span>
+          );
+        }
+
+        const plugin = pluginService.getPlugin(activeInstance.pluginId);
+        if (!plugin) {
+          return (
+            <div className="flex-1 flex items-center justify-center bg-gray-50">
+              <div className="text-center text-red-600">
+                <p>Plugin not found: {activeInstance.pluginId}</p>
+              </div>
+            </div>
+          );
+        }
+
+        const CustomRenderer = plugin.customRenderer;
+        const pluginConfig = {
+          ...pluginService.getPluginSettings(plugin.id),
+          ...activeInstance.config,
+          workingDirectory: activeInstance.workingDirectory || project.path
+        };
+
+        return (
+          <div className="flex-1 flex bg-gray-50 overflow-hidden">
+            <div className="flex-1 flex flex-col overflow-hidden">
+              {CustomRenderer ? (
+                <CustomRenderer
+                  plugin={plugin}
+                  session={{ id: activeInstance.sessionId, agent_id: activeInstance.sessionId }}
+                  server={undefined}
+                  onCommand={async (cmd) => {
+                    console.log(`${plugin.name} command:`, cmd);
+                  }}
+                  config={pluginConfig}
+                />
+              ) : plugin.id === 'claude-code' ? (
+                <ClaudeCodeUI
+                  plugin={plugin}
+                  session={{ id: activeInstance.sessionId, agent_id: activeInstance.sessionId }}
+                  server={undefined}
+                  onCommand={async (cmd) => {
+                    console.log('Claude Code command:', cmd);
+                  }}
+                  config={pluginConfig}
+                />
+              ) : plugin.id === 'claude-agent-direct' ? (
+                <ClaudeAgentDirectUI
+                  plugin={plugin}
+                  session={{ id: activeInstance.sessionId, agent_id: activeInstance.sessionId }}
+                  server={undefined}
+                  onCommand={async (cmd) => {
+                    console.log('Claude Agent command:', cmd);
+                  }}
+                  config={pluginConfig}
+                />
+              ) : (
+                <div className="flex-1 flex items-center justify-center">
+                  <p className="text-gray-600">No UI renderer for plugin: {plugin.name}</p>
+                </div>
               )}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Claude Code UI or Tmux Terminal Display */}
-      {showClaudeCode ? (
-        <div className="flex-1 flex bg-gray-50 overflow-hidden">
-          <div className="flex-1 flex flex-col overflow-hidden">
-            <ClaudeCodeUI
-              plugin={activePlugin}
-              session={claudeSessionId ? { id: claudeSessionId, agent_id: claudeSessionId } : undefined}
-              server={undefined}
-              onCommand={async (cmd) => {
-                console.log('Claude Code command:', cmd);
-              }}
-              config={{
-                ...pluginService.getPluginSettings('claude-code'),
-                workingDirectory: project.path
-              }}
-            />
-          </div>
-          {showSenseiPanel && (
-            <div className="w-96 flex-shrink-0 flex flex-col overflow-hidden">
-              <SenseiPanel
-                serverId="claude-code"
-                sessionId={claudeSessionId || ''}
-                onPendingCountChange={setPendingSenseiCount}
-                onExecuteCommand={(command) => {
-                  // Command will be executed through Claude Code
-                }}
-                onOpenSettings={() => setShowSenseiSettings(true)}
-              />
             </div>
-          )}
-        </div>
-      ) : activeTmuxSession ? (
+            {showSenseiPanel && (
+              <div className="w-[800px] flex-shrink-0 flex flex-col overflow-hidden">
+                <SenseiPanel
+                  serverId={plugin.id}
+                  sessionId={activeInstance.sessionId}
+                  workingDirectory={activeInstance.workingDirectory || project.path}
+                  onPendingCountChange={setPendingSenseiCount}
+                  onExecuteCommand={(command) => {
+                    // Command will be executed through active plugin
+                  }}
+                  onOpenSettings={() => setShowSenseiSettings(true)}
+                  devServerLogs={devServerLogs}
+                  devServerRunning={devServerRunning}
+                  devServerId={serverIdRef.current}
+                  onClearDevServerLogs={handleClearDevServerLogs}
+                  onStopDevServer={handleStopDevServer}
+                />
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* Legacy: Tmux Terminal Display (kept for backward compatibility) */}
+      {activeTmuxSession && !getActiveInstance() && (
         <div className="flex-1 flex bg-gray-50 overflow-hidden">
           <div className="flex-1 flex flex-col bg-black overflow-hidden">
             <div className="flex items-center justify-between bg-white p-3 border-b border-gray-200">
               <span className="text-green-400 text-sm font-mono">Tmux Session: {activeTmuxSession.id}</span>
               <div className="flex items-center space-x-2">
-                <button
-                  onClick={() => {
-                    setShowSenseiPanel(!showSenseiPanel);
-                    setSenseiEnabled(prev => ({ ...prev, tmux: !prev.tmux }));
-                    if (!showSenseiPanel && activeServerId && sessionIds[activeServerId]) {
-                      // Initialize Sensei for tmux if we have a server session
-                      senseiService.toggleSensei(activeServerId, sessionIds[activeServerId], true);
-                    }
-                  }}
-                  className={`p-1.5 rounded transition-colors relative ${
-                    showSenseiPanel
-                      ? 'text-blue-400 bg-blue-600/20'
-                      : 'text-gray-500 hover:text-gray-300'
-                  }`}
-                  title="Toggle Sensei AI Assistant"
-                >
-                  <Brain className="h-4 w-4" />
-                  {pendingSenseiCount > 0 && (
-                    <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center font-bold">
-                      {pendingSenseiCount}
-                    </span>
-                  )}
-                </button>
                 <button
                   onClick={() => setAutoRefresh(!autoRefresh)}
                   className={`px-3 py-1 rounded text-xs transition-colors ${
@@ -1406,7 +1642,7 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
             </div>
           </div>
           {showSenseiPanel && (
-            <div className="w-[600px] flex-shrink-0 overflow-hidden bg-white border-l border-gray-200">
+            <div className="w-[800px] flex-shrink-0 overflow-hidden bg-white border-l border-gray-200">
               <div className="flex flex-col h-full">
                 <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
                   <div className="flex items-center gap-2">
@@ -1703,148 +1939,6 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
             </div>
           )}
         </div>
-      ) : servers.length > 0 ? (
-        <div className="flex-1 flex flex-col">
-          {/* Server Tabs */}
-          <div className="flex bg-white border-b border-gray-200 overflow-x-auto">
-            {servers.map((server) => {
-              const isActive = activeServerId === server.id;
-              const statusColor = server.status === 'Running' ? 'text-green-400' :
-                                server.status === 'Starting' ? 'text-yellow-400' :
-                                'text-red-400';
-
-              return (
-                <div
-                  key={server.id}
-                  className={`flex items-center px-4 py-3 cursor-pointer border-r border-gray-200 min-w-[200px] transition-colors ${
-                    isActive ? 'bg-gray-100 text-gray-900' : 'bg-white text-gray-600 hover:bg-gray-50'
-                  }`}
-                  onClick={async () => {
-                    setActiveServerId(server.id);
-                    if (!sessionReady[server.id]) {
-                      await handleCreateSession(server.id);
-                    }
-                  }}
-                >
-                  <Server className="h-4 w-4 mr-2" />
-                  <span className="text-sm font-medium">Port {server.port}</span>
-                  <span className={`ml-2 text-xs ${statusColor}`}>●</span>
-                  <div className="ml-auto flex items-center gap-2">
-                    {isActive && (
-                      <>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            const enabled = !senseiEnabled[server.id];
-                            setSenseiEnabled(prev => ({ ...prev, [server.id]: enabled }));
-                            setShowSenseiPanel(enabled);
-                            if (sessionIds[server.id]) {
-                              senseiService.toggleSensei(server.id, sessionIds[server.id], enabled);
-                            }
-                          }}
-                          className={`p-1.5 rounded transition-colors relative ${
-                            senseiEnabled[server.id]
-                              ? 'text-blue-400 bg-blue-600/20'
-                              : 'text-gray-500 hover:text-gray-300'
-                          }`}
-                          title="Toggle Sensei AI Assistant"
-                        >
-                          <Brain className="h-4 w-4" />
-                          {pendingSenseiCount > 0 && (
-                            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center font-bold">
-                              {pendingSenseiCount}
-                            </span>
-                          )}
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleStopServer(server.id);
-                          }}
-                          className="text-gray-400 hover:text-red-400"
-                        >
-                          ×
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Terminal and Sensei Content */}
-          <div className="flex-1 bg-gray-50 flex">
-            <div className="flex-1 bg-gray-50">
-              {activeServerId && sessionReady[activeServerId] ? (
-                <Terminal
-                  key={`${activeServerId}-${sessionIds[activeServerId]}`}
-                  serverId={activeServerId}
-                  sessionId={sessionIds[activeServerId]}
-                  isNewSession={isNewSession[activeServerId] || false}
-                  onClose={() => setActiveServerId(null)}
-                  enableSensei={senseiEnabled[activeServerId] || false}
-                />
-              ) : activeServerId ? (
-              <div className="flex items-center justify-center h-full text-gray-500">
-                <div className="text-center">
-                  <Server className="h-12 w-12 mx-auto mb-4" />
-                  <p>Initializing session...</p>
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center justify-center h-full text-gray-500">
-                <div className="text-center">
-                  <TerminalIcon className="h-12 w-12 mx-auto mb-4" />
-                  <p>Select a server to view terminal</p>
-                </div>
-              </div>
-            )}
-            </div>
-            {showSenseiPanel && (
-              <div className="w-96 flex-shrink-0 h-full">
-                {activeServerId && sessionIds[activeServerId] ? (
-                  <SenseiPanel
-                    serverId={activeServerId}
-                    sessionId={sessionIds[activeServerId]}
-                    onPendingCountChange={setPendingSenseiCount}
-                    onExecuteCommand={(command) => {
-                      // Command will be executed through event system
-                      // Command execution is visible in terminal
-                    }}
-                    onOpenSettings={() => setShowSenseiSettings(true)}
-                  />
-                ) : (
-                  <div className="flex flex-col h-full bg-white border-l border-gray-200">
-                    <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200">
-                      <div className="flex items-center gap-2">
-                        <Brain className="h-5 w-5 text-gray-500" />
-                        <span className="font-medium text-gray-200">Sensei AI Assistant</span>
-                      </div>
-                    </div>
-                    <div className="flex-1 flex items-center justify-center p-4">
-                      <div className="text-center">
-                        <Brain className="h-12 w-12 text-gray-600 mb-3" />
-                        <p className="text-gray-400 mb-2">{!activeServerId ? 'No server selected' : 'No session active'}</p>
-                        <p className="text-sm text-gray-500">
-                          {!activeServerId ? 'Select a server to use Sensei' : 'Create or connect to a session to use Sensei'}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div className="flex-1 flex items-center justify-center bg-gray-50">
-          <div className="text-center">
-            <Monitor className="h-16 w-16 text-gray-600 mx-auto mb-4" />
-            <p className="text-gray-700 text-lg mb-2">No agents running for this project</p>
-            <p className="text-gray-600 text-sm">Click "Start Agent Session" to launch a new coding agent</p>
-          </div>
-        </div>
       )}
 
       {/* Sensei Settings Modal */}
@@ -1855,6 +1949,119 @@ const ProjectView: React.FC<ProjectViewProps> = ({ project, onBack, onEdit, onDe
           isOpen={showSenseiSettings}
           onClose={() => setShowSenseiSettings(false)}
         />
+      )}
+
+      {/* Dev Server Launcher FAB */}
+      {!devServerRunning && (
+        <button
+          onClick={() => setShowDevServerModal(true)}
+          className="fixed bottom-6 right-6 p-4 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-full shadow-lg hover:shadow-xl transition-all border-2 border-black hover:scale-110"
+          title="Launch Dev Server"
+        >
+          <Play className="w-6 h-6" fill="currentColor" />
+        </button>
+      )}
+
+      {/* Dev Server Modal */}
+      {showDevServerModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white border-4 border-black rounded-lg p-6 w-[500px] shadow-[8px_8px_0px_0px_rgba(0,0,0,1)]">
+            <h3 className="text-2xl font-bold mb-4 text-black">Launch Dev Server</h3>
+
+            <div className="space-y-4">
+              {/* Available Scripts Selector */}
+              {Object.keys(availableScripts).length > 0 && (
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 mb-2">Available Scripts</label>
+                  <select
+                    value={selectedScript}
+                    onChange={(e) => {
+                      setSelectedScript(e.target.value);
+                      if (e.target.value) {
+                        setDevServerCommand(`npm run ${e.target.value}`);
+                      }
+                    }}
+                    className="w-full px-3 py-2 bg-white border-2 border-black rounded font-mono text-sm"
+                  >
+                    <option value="">-- Select a script --</option>
+                    {Object.keys(availableScripts).map((scriptName) => (
+                      <option key={scriptName} value={scriptName}>
+                        {scriptName} - {availableScripts[scriptName]}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">Port</label>
+                <input
+                  type="number"
+                  value={devServerPort}
+                  onChange={(e) => setDevServerPort(parseInt(e.target.value) || 3010)}
+                  min={3010}
+                  max={3100}
+                  className="w-full px-3 py-2 bg-white border-2 border-black rounded font-mono text-sm"
+                />
+                <p className="text-xs text-gray-500 mt-1">Random port between 3010-3100</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">Command</label>
+                <input
+                  type="text"
+                  value={devServerCommand}
+                  onChange={(e) => setDevServerCommand(e.target.value)}
+                  placeholder="npm run dev"
+                  className="w-full px-3 py-2 bg-white border-2 border-black rounded font-mono text-sm"
+                />
+                <p className="text-xs text-gray-500 mt-1">Auto-filled from script selection or package.json</p>
+              </div>
+
+              {/* Playwright Options */}
+              <div className="space-y-2 pt-2 border-t-2 border-gray-200">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={launchPlaywright}
+                    onChange={(e) => setLaunchPlaywright(e.target.checked)}
+                    className="w-4 h-4 border-2 border-black rounded"
+                  />
+                  <span className="text-sm font-bold text-gray-700">Launch Playwright Browser</span>
+                </label>
+
+                {launchPlaywright && (
+                  <label className="flex items-center gap-2 cursor-pointer ml-6">
+                    <input
+                      type="checkbox"
+                      checked={playwrightHeadless}
+                      onChange={(e) => setPlaywrightHeadless(e.target.checked)}
+                      className="w-4 h-4 border-2 border-black rounded"
+                    />
+                    <span className="text-sm text-gray-700">Headless Mode</span>
+                  </label>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 mt-6">
+              <button
+                onClick={() => setShowDevServerModal(false)}
+                disabled={devServerLoading}
+                className="px-4 py-2 bg-gray-200 text-black font-bold border-2 border-black rounded hover:bg-gray-300 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleLaunchDevServer}
+                disabled={devServerLoading}
+                className="px-4 py-2 bg-blue-500 text-white font-bold border-2 border-black rounded hover:bg-blue-600 disabled:opacity-50 shadow-[4px_4px_0px_0px_rgba(0,0,0,1)] hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all"
+              >
+                {devServerLoading ? 'Launching...' : 'Launch'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
