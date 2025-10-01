@@ -1,13 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { Server, Cpu, CheckCircle, XCircle, Activity, Zap, Database, Wifi, Bot, MessageSquare } from 'lucide-react';
+import { Server, Cpu, CheckCircle, XCircle, Activity, Zap, Database, Wifi, Bot, MessageSquare, FolderOpen } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import ClaudeIcon from './icons/ClaudeIcon';
 import type { OpenCodeServer, OrchestratorSession } from '../types';
 import { apiKeyService } from '../services/ApiKeyService';
+import { projectsService, type Project } from '../services/ProjectsService';
 
 interface DashboardProps {
   servers: OpenCodeServer[];
   sessions: OrchestratorSession[];
+  onProjectSelect?: (project: Project) => void;
 }
 
 interface SlackStatus {
@@ -22,18 +24,32 @@ interface ClaudeAgentStatus {
   sessions?: number;
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ servers, sessions }) => {
+const Dashboard: React.FC<DashboardProps> = ({ servers, sessions, onProjectSelect }) => {
   const [slackStatus, setSlackStatus] = useState<SlackStatus>({ initialized: false, service_running: false });
   const [claudeAgentStatus, setClaudeAgentStatus] = useState<ClaudeAgentStatus>({ configured: false });
   const [loadingSlack, setLoadingSlack] = useState(true);
   const [slackActionLoading, setSlackActionLoading] = useState(false);
+  const [recentProjects, setRecentProjects] = useState<Project[]>([]);
+  const [loadingProjects, setLoadingProjects] = useState(true);
 
   useEffect(() => {
     loadServiceStatuses();
+    loadRecentProjects();
     // Refresh status every 5 seconds
     const interval = setInterval(loadServiceStatuses, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  const loadRecentProjects = async () => {
+    try {
+      const projects = await projectsService.listRecentProjects(5);
+      setRecentProjects(projects);
+    } catch (error) {
+      console.error('Failed to load recent projects:', error);
+    } finally {
+      setLoadingProjects(false);
+    }
+  };
 
   const loadServiceStatuses = async () => {
     // Load Slack status - call service directly instead of through Rust
@@ -230,6 +246,61 @@ const Dashboard: React.FC<DashboardProps> = ({ servers, sessions }) => {
                 </div>
               </div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Recent Projects */}
+      <div className="mt-6">
+        <div className="bg-white border-4 border-black rounded-lg shadow-[6px_6px_0px_0px_rgba(0,0,0,1)]">
+          <div className="p-4 bg-gradient-to-r from-blue-100 to-purple-100 border-b-4 border-black">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-white border-2 border-black rounded shadow-[2px_2px_0px_0px_rgba(0,0,0,1)]">
+                <FolderOpen className="text-blue-700 w-5 h-5" />
+              </div>
+              <h3 className="text-lg font-black text-black uppercase">Recent Projects</h3>
+            </div>
+          </div>
+          <div className="p-6">
+            {loadingProjects ? (
+              <div className="text-center text-gray-500 py-8">Loading projects...</div>
+            ) : recentProjects.length === 0 ? (
+              <div className="text-center text-gray-500 py-8">
+                <p className="mb-2">No recent projects</p>
+                <p className="text-xs">Create a project from the Projects page</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {recentProjects.map((project) => (
+                  <button
+                    key={project.id}
+                    onClick={() => onProjectSelect?.(project)}
+                    className="p-4 bg-white border-2 border-black rounded-lg shadow-[3px_3px_0px_0px_rgba(0,0,0,1)] hover:shadow-[5px_5px_0px_0px_rgba(0,0,0,1)] hover:translate-x-[-1px] hover:translate-y-[-1px] transition-all text-left"
+                  >
+                    <div className="flex items-start gap-3">
+                      <div
+                        className="w-10 h-10 rounded border-2 border-black flex items-center justify-center text-xl font-bold flex-shrink-0"
+                        style={{ backgroundColor: project.color || '#3b82f6' }}
+                      >
+                        {project.name.charAt(0).toUpperCase()}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <h4 className="font-bold text-sm mb-1 truncate">{project.name}</h4>
+                        <p className="text-xs text-gray-600 truncate" title={project.path}>{project.path}</p>
+                        {project.description && (
+                          <p className="text-xs text-gray-500 mt-1 line-clamp-2">{project.description}</p>
+                        )}
+                        {project.last_accessed && (
+                          <p className="text-xs text-gray-400 mt-2">
+                            Last accessed {new Date(project.last_accessed).toLocaleDateString()}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>

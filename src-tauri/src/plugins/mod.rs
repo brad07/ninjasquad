@@ -2,6 +2,7 @@ pub mod types;
 pub mod manager;
 pub mod opencode;
 pub mod claude_code;
+pub mod sessions;
 
 use async_trait::async_trait;
 use std::collections::HashMap;

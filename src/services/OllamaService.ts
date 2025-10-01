@@ -99,7 +99,7 @@ class OllamaService {
       model: localStorage.getItem('ollama-model') || 'llama3.1',
       baseUrl: localStorage.getItem('ollama-base-url') || 'http://localhost:11434',
       temperature: parseFloat(localStorage.getItem('ollama-temperature') || '0.7'),
-      maxTokens: parseInt(localStorage.getItem('ollama-max-tokens') || '500'),
+      maxTokens: parseInt(localStorage.getItem('ollama-max-tokens') || '2000'),
       systemPrompt: localStorage.getItem('ollama-system-prompt') || DEFAULT_SYSTEM_PROMPT,
       analysisThrottle: parseInt(localStorage.getItem('ollama-throttle') || '3000'), // 3 seconds
     };

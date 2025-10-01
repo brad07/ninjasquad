@@ -6,6 +6,7 @@ import type { SessionState } from '../../types/claude-agent-session';
 import { claudeAgentSDKService } from '../../services/ClaudeAgentSDKService';
 import { claudeAgentService } from '../../services/ClaudeAgentService';
 import { senseiService } from '../../services/SenseiService';
+import { conversationHistoryService } from '../../services/ConversationHistoryService';
 import { onSenseiApproved, onSenseiAnalyzing } from '../../services/EventBus';
 import { ToolUseDisplay, ToolUse as SharedToolUse } from '../shared/ToolUseDisplay';
 import '../../styles/sensei-animations.css';
@@ -152,10 +153,34 @@ const ClaudeAgentDirectUI: React.FC<ClaudeAgentDirectUIProps> = ({
       const workingDir = config?.workingDirectory || process.cwd();
       const existingSession = claudeAgentSDKService.getSession(session.id);
 
+      let restoredHistory: any[] = [];
+
       if (!existingSession) {
+        // Check if conversation history exists in database
+        addServiceLog(`Checking for existing session: ${session.id}`);
+        console.log('[ClaudeAgentDirect] Restore check - session ID:', session.id);
+        try {
+          const history = await conversationHistoryService.getHistory(session.id);
+          if (history && history.length > 0) {
+            addServiceLog(`Found existing conversation with ${history.length} messages`);
+            restoredHistory = history;
+            console.log('[ClaudeAgentDirect] Restored history from database:', restoredHistory.length);
+          } else {
+            console.log('[ClaudeAgentDirect] No history found in database');
+          }
+        } catch (error) {
+          console.error('[ClaudeAgentDirect] Error loading history from database:', error);
+          addServiceLog(`Error loading history: ${error}`);
+        }
+
         // Create session via Node.js backend
-        addServiceLog(`Creating new session: ${session.id} in ${workingDir}`);
-        await claudeAgentSDKService.createSession(workingDir, config?.model || plugin.defaultModel, session.id);
+        addServiceLog(`Creating session: ${session.id} in ${workingDir}`);
+        await claudeAgentSDKService.createSession(
+          workingDir,
+          config?.model || plugin.defaultModel,
+          session.id,
+          false // No need to restore from Node.js file anymore
+        );
         sessionIdRef.current = session.id;
         addServiceLog('Session created successfully');
       } else {
@@ -174,6 +199,48 @@ const ClaudeAgentDirectUI: React.FC<ClaudeAgentDirectUIProps> = ({
         confidenceThreshold: 0.8
       });
       addServiceLog('Sensei session initialized');
+
+      // Load restored conversation history into UI
+      console.log('[ClaudeAgentDirect] About to load history. Length:', restoredHistory.length);
+      if (restoredHistory.length > 0) {
+        addServiceLog(`Loading ${restoredHistory.length} messages into conversation...`);
+
+        // Set messages directly to show full conversation history
+        setMessages(restoredHistory);
+
+        // Also add assistant messages to Sensei panel (without AI analysis)
+        let assistantCount = 0;
+        for (let i = 0; i < restoredHistory.length; i++) {
+          const msg = restoredHistory[i];
+
+          if (msg.role === 'assistant' && msg.content) {
+            assistantCount++;
+
+            // Find the previous user message for context
+            let userInput = '';
+            if (i > 0 && restoredHistory[i - 1].role === 'user') {
+              userInput = restoredHistory[i - 1].content;
+            }
+
+            console.log('[ClaudeAgentDirect] Adding assistant message', assistantCount, 'to Sensei (no AI analysis)');
+
+            // Add directly without triggering Sensei AI analysis
+            senseiService.addDirectRecommendation(
+              'claude-agent-direct',
+              session.id,
+              userInput,
+              msg.content,
+              'agent', // Display as "Agent" in UI
+              0, // confidence 0 for historical messages
+              msg.id // use existing message ID
+            );
+          }
+        }
+        addServiceLog(`Loaded conversation history (${restoredHistory.length} messages, ${assistantCount} in Sensei)`);
+        console.log('[ClaudeAgentDirect] Finished loading history. Messages in UI:', restoredHistory.length, 'in Sensei:', assistantCount);
+      } else {
+        console.log('[ClaudeAgentDirect] No history to load');
+      }
 
       isInitializedRef.current = true;
       setIsInitialized(true);

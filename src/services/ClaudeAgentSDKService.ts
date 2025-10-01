@@ -6,6 +6,7 @@ import type {
   SDKServiceConfig,
   ToolUseInfo
 } from '../types/claude-agent-sdk';
+import { conversationHistoryService } from './ConversationHistoryService';
 
 /**
  * Service for Claude Agent SDK integration via Node.js backend
@@ -74,8 +75,9 @@ class ClaudeAgentSDKService {
 
   /**
    * Create a new session
+   * @param restore - If true, backend will restore conversation history from disk
    */
-  async createSession(workingDirectory: string, model?: string, sessionId?: string): Promise<string> {
+  async createSession(workingDirectory: string, model?: string, sessionId?: string, restore?: boolean): Promise<string> {
     const id = sessionId || `agent-${Date.now()}-${Math.random().toString(36).substring(7)}`;
 
     const response = await fetch(`${this.serviceUrl}/create-session`, {
@@ -84,7 +86,8 @@ class ClaudeAgentSDKService {
       body: JSON.stringify({
         session_id: id,
         working_directory: workingDirectory,
-        model: model || this.defaultModel
+        model: model || this.defaultModel,
+        restore: restore || false
       })
     });
 
@@ -92,6 +95,8 @@ class ClaudeAgentSDKService {
       const error = await response.json();
       throw new Error(error.error || 'Failed to create session');
     }
+
+    const responseData = await response.json();
 
     const session: AgentSession = {
       id,
@@ -105,6 +110,9 @@ class ClaudeAgentSDKService {
 
     this.sessions.set(id, session);
     console.log('[ClaudeAgentSDK] Created session:', id, 'in', workingDirectory);
+    if (responseData.restored_messages > 0) {
+      console.log('[ClaudeAgentSDK] Restored', responseData.restored_messages, 'messages from disk');
+    }
 
     return id;
   }
@@ -216,15 +224,36 @@ class ClaudeAgentSDKService {
                 timestamp: data.timestamp
               } as StreamChunk;
             } else if (data.type === 'done') {
-              // Update conversation history
+              // Save conversation history to database
+              const userMessageId = `msg-${Date.now()}-user`;
+              const userTimestamp = new Date().toISOString();
+
+              await conversationHistoryService.addMessage(
+                userMessageId,
+                sessionId,
+                'user',
+                message,
+                userTimestamp
+              );
+
+              await conversationHistoryService.addMessage(
+                data.message.id,
+                sessionId,
+                'assistant',
+                data.message.content,
+                data.message.timestamp
+              );
+
+              // Also update in-memory history for compatibility
               session.conversationHistory.push({
-                id: data.message.id,
+                id: userMessageId,
                 role: 'user',
                 content: message,
-                timestamp: new Date().toISOString()
+                timestamp: userTimestamp
               });
               session.conversationHistory.push(data.message);
-              console.log('[ClaudeAgentSDK] Stream completed');
+
+              console.log('[ClaudeAgentSDK] Stream completed, messages saved to database');
               return;
             }
           }
@@ -275,10 +304,17 @@ class ClaudeAgentSDKService {
 
   /**
    * Get conversation history for a session
+   * Loads from database instead of in-memory
    */
-  getConversationHistory(sessionId: string): ConversationMessage[] {
-    const session = this.sessions.get(sessionId);
-    return session ? session.conversationHistory : [];
+  async getConversationHistory(sessionId: string): Promise<ConversationMessage[]> {
+    try {
+      return await conversationHistoryService.getHistory(sessionId);
+    } catch (error) {
+      console.error('[ClaudeAgentSDK] Failed to load history from database:', error);
+      // Fallback to in-memory if database fails
+      const session = this.sessions.get(sessionId);
+      return session ? session.conversationHistory : [];
+    }
   }
 }
 

@@ -8,6 +8,7 @@ export const ClaudeCodePlugin: CodingAgentPlugin = {
   description: 'Claude AI agent with rich chat interface and tool use visualization (powered by Claude Agent SDK)',
   author: 'Anthropic Integration',
   icon: '/icons/claude.svg',
+  enabled: false, // Hidden for now
   supportedModels: [
     'claude-sonnet-4-5-20250929',
     'claude-sonnet-4-20250514',

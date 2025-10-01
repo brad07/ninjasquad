@@ -263,7 +263,10 @@ function App() {
 
     switch (currentView) {
       case 'dashboard':
-        return <Dashboard servers={servers} sessions={sessions} />;
+        return <Dashboard servers={servers} sessions={sessions} onProjectSelect={(project) => {
+          setSelectedProject(project);
+          setCurrentView('projects');
+        }} />;
       case 'projects':
         // Show empty state when no project is selected
         return (
@@ -299,7 +302,7 @@ function App() {
       case 'admin':
         return <AdminPage />;
       default:
-        return <Dashboard servers={servers} sessions={sessions} />;
+        return <Dashboard servers={servers} sessions={sessions} onProjectSelect={setSelectedProject} />;
     }
   };
 

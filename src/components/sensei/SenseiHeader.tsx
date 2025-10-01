@@ -80,7 +80,7 @@ export const SenseiHeader: React.FC<SenseiHeaderProps> = ({
     }`}>
       <div className="flex items-center gap-2">
         <Brain className={`h-5 w-5 ${isEnabled ? 'text-purple-700' : 'text-gray-500'}`} strokeWidth={2.5} />
-        <span className="font-bold text-black">SensAI</span>
+        <span className="font-bold text-black">SensAI Chat</span>
       </div>
       <div className="flex items-center gap-2">
         <button

@@ -1087,6 +1087,150 @@ end tell"#,
         Ok(response)
     }
 
+    // Plugin Session Management Commands
+    #[tauri::command]
+    async fn create_plugin_session(
+        db: State<'_, DatabaseManager>,
+        session_id: String,
+        request: crate::plugins::sessions::CreateSessionRequest,
+    ) -> Result<crate::plugins::sessions::PluginSession, String> {
+        let manager = crate::plugins::sessions::PluginSessionManager::new(&db);
+        manager.create(session_id, request).map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn get_plugin_session(
+        db: State<'_, DatabaseManager>,
+        session_id: String,
+    ) -> Result<Option<crate::plugins::sessions::PluginSession>, String> {
+        let manager = crate::plugins::sessions::PluginSessionManager::new(&db);
+        manager.get(&session_id).map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn list_plugin_sessions(
+        db: State<'_, DatabaseManager>,
+        project_id: String,
+        status: Option<String>,
+    ) -> Result<Vec<crate::plugins::sessions::PluginSession>, String> {
+        let manager = crate::plugins::sessions::PluginSessionManager::new(&db);
+        manager.list_by_project(&project_id, status.as_deref()).map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn update_plugin_session(
+        db: State<'_, DatabaseManager>,
+        session_id: String,
+        request: crate::plugins::sessions::UpdateSessionRequest,
+    ) -> Result<Option<crate::plugins::sessions::PluginSession>, String> {
+        let manager = crate::plugins::sessions::PluginSessionManager::new(&db);
+        manager.update(&session_id, request).map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn update_plugin_session_last_active(
+        db: State<'_, DatabaseManager>,
+        session_id: String,
+    ) -> Result<(), String> {
+        let manager = crate::plugins::sessions::PluginSessionManager::new(&db);
+        manager.update_last_active(&session_id).map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn archive_plugin_session(
+        db: State<'_, DatabaseManager>,
+        session_id: String,
+    ) -> Result<bool, String> {
+        let manager = crate::plugins::sessions::PluginSessionManager::new(&db);
+        manager.archive(&session_id).map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn delete_plugin_session(
+        db: State<'_, DatabaseManager>,
+        session_id: String,
+    ) -> Result<bool, String> {
+        let manager = crate::plugins::sessions::PluginSessionManager::new(&db);
+        manager.delete(&session_id).map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn delete_old_archived_sessions(
+        db: State<'_, DatabaseManager>,
+        days: i64,
+    ) -> Result<usize, String> {
+        let manager = crate::plugins::sessions::PluginSessionManager::new(&db);
+        manager.delete_old_archived(days).map_err(|e| e.to_string())
+    }
+
+    // Conversation History Commands
+    #[tauri::command]
+    async fn add_conversation_message(
+        db: State<'_, DatabaseManager>,
+        id: String,
+        session_id: String,
+        role: String,
+        content: String,
+        timestamp: String,
+    ) -> Result<(), String> {
+        db.with_connection(|conn| {
+            crate::database::conversation::add_message(
+                conn,
+                &id,
+                &session_id,
+                &role,
+                &content,
+                &timestamp,
+            )
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn get_conversation_history(
+        db: State<'_, DatabaseManager>,
+        session_id: String,
+    ) -> Result<Vec<crate::database::conversation::ConversationMessage>, String> {
+        db.with_connection(|conn| {
+            crate::database::conversation::get_session_messages(conn, &session_id)
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn get_recent_conversation_messages(
+        db: State<'_, DatabaseManager>,
+        session_id: String,
+        limit: usize,
+    ) -> Result<Vec<crate::database::conversation::ConversationMessage>, String> {
+        db.with_connection(|conn| {
+            crate::database::conversation::get_recent_messages(conn, &session_id, limit)
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn count_conversation_messages(
+        db: State<'_, DatabaseManager>,
+        session_id: String,
+    ) -> Result<usize, String> {
+        db.with_connection(|conn| {
+            crate::database::conversation::count_messages(conn, &session_id)
+        })
+        .map_err(|e| e.to_string())
+    }
+
+    #[tauri::command]
+    async fn delete_conversation_history(
+        db: State<'_, DatabaseManager>,
+        session_id: String,
+    ) -> Result<(), String> {
+        db.with_connection(|conn| {
+            crate::database::conversation::delete_session_messages(conn, &session_id)
+        })
+        .map_err(|e| e.to_string())
+    }
+
     #[cfg_attr(mobile, tauri::mobile_entry_point)]
     pub fn run() {
         let queue_config = QueueConfig::default();
@@ -1233,6 +1377,19 @@ end tell"#,
                 crate::projects::update_project_last_accessed,
                 crate::projects::delete_project,
                 crate::projects::project_exists,
+                create_plugin_session,
+                get_plugin_session,
+                list_plugin_sessions,
+                update_plugin_session,
+                update_plugin_session_last_active,
+                archive_plugin_session,
+                delete_plugin_session,
+                delete_old_archived_sessions,
+                add_conversation_message,
+                get_conversation_history,
+                get_recent_conversation_messages,
+                count_conversation_messages,
+                delete_conversation_history,
             ])
             .setup(move |app| {
                 // Initialize database

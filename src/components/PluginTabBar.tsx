@@ -8,10 +8,10 @@ import ClaudeIcon from './icons/ClaudeIcon';
 interface PluginTabBarProps {
   instances: PluginInstance[];
   activeInstanceId: string | null;
-  onSwitchInstance: (instanceId: string) => void;
-  onCreateInstance: (pluginId: string) => void;
-  onCloseInstance: (instanceId: string) => void;
-  onRenameInstance: (instanceId: string, newTitle: string) => void;
+  onSwitchInstance: (instanceId: string) => void | Promise<void>;
+  onCreateInstance: (pluginId: string) => void | Promise<void>;
+  onCloseInstance: (instanceId: string) => void | Promise<void>;
+  onRenameInstance: (instanceId: string, newTitle: string) => void | Promise<void>;
 }
 
 export const PluginTabBar: React.FC<PluginTabBarProps> = ({
@@ -32,9 +32,9 @@ export const PluginTabBar: React.FC<PluginTabBarProps> = ({
     setEditTitle(instance.title);
   };
 
-  const finishEditing = (instanceId: string) => {
+  const finishEditing = async (instanceId: string) => {
     if (editTitle.trim()) {
-      onRenameInstance(instanceId, editTitle.trim());
+      await onRenameInstance(instanceId, editTitle.trim());
     }
     setEditingInstanceId(null);
     setEditTitle('');
@@ -58,8 +58,8 @@ export const PluginTabBar: React.FC<PluginTabBarProps> = ({
     return <div className="w-4 h-4 bg-gray-400 rounded" />;
   };
 
-  const handleSelectPlugin = (plugin: CodingAgentPlugin) => {
-    onCreateInstance(plugin.id);
+  const handleSelectPlugin = async (plugin: CodingAgentPlugin) => {
+    await onCreateInstance(plugin.id);
     setShowPluginSelector(false);
   };
 

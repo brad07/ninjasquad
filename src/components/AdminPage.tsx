@@ -656,20 +656,6 @@ export const AdminPage: React.FC = () => {
                 </div>
                 <p className="text-sm text-gray-600">Repository and code management</p>
               </div>
-              <div className="p-4 border-2 border-black rounded-lg hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-bold">Jira</span>
-                  <span className="text-xs bg-gray-400 text-white px-2 py-1 rounded-full">Coming Soon</span>
-                </div>
-                <p className="text-sm text-gray-600">Advanced project tracking</p>
-              </div>
-              <div className="p-4 border-2 border-black rounded-lg hover:shadow-[2px_2px_0px_0px_rgba(0,0,0,1)] transition-all">
-                <div className="flex items-center justify-between mb-2">
-                  <span className="font-bold">Discord</span>
-                  <span className="text-xs bg-gray-400 text-white px-2 py-1 rounded-full">Coming Soon</span>
-                </div>
-                <p className="text-sm text-gray-600">Team communication and notifications</p>
-              </div>
             </div>
           </div>
         </div>

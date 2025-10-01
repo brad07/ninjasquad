@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
 
 pub mod schema;
+pub mod conversation;
 
 pub struct DatabaseManager {
     conn: Arc<Mutex<Connection>>,

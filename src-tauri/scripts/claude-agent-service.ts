@@ -17,11 +17,21 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { execSync } from 'child_process';
-import { existsSync, mkdirSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
+import os from 'os';
 
 // Get __dirname equivalent in ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Session directory for conversation history
+const SESSION_DIR = path.join(os.homedir(), '.ninjasquad', 'sessions');
+
+// Ensure session directory exists
+if (!existsSync(SESSION_DIR)) {
+  mkdirSync(SESSION_DIR, { recursive: true });
+  console.log('[ClaudeAgentService] Created session directory:', SESSION_DIR);
+}
 
 // Types
 interface AgentSession {
@@ -66,6 +76,38 @@ let apiKey: string | null = null;
 let defaultModel = 'claude-sonnet-4-5-20250929';
 let defaultPermissionMode = 'default';
 
+// Helper functions for conversation history persistence
+function saveConversationHistory(sessionId: string, history: ConversationMessage[]): void {
+  try {
+    const filePath = path.join(SESSION_DIR, `${sessionId}.json`);
+    writeFileSync(filePath, JSON.stringify(history, null, 2));
+    console.log(`[ClaudeAgentService] Saved ${history.length} messages for session ${sessionId}`);
+  } catch (error) {
+    console.error(`[ClaudeAgentService] Failed to save conversation history for ${sessionId}:`, error);
+  }
+}
+
+function loadConversationHistory(sessionId: string): ConversationMessage[] | null {
+  try {
+    const filePath = path.join(SESSION_DIR, `${sessionId}.json`);
+    if (existsSync(filePath)) {
+      const data = readFileSync(filePath, 'utf-8');
+      const history = JSON.parse(data);
+      console.log(`[ClaudeAgentService] Loaded ${history.length} messages for session ${sessionId}`);
+      return history;
+    }
+    return null;
+  } catch (error) {
+    console.error(`[ClaudeAgentService] Failed to load conversation history for ${sessionId}:`, error);
+    return null;
+  }
+}
+
+function sessionFileExists(sessionId: string): boolean {
+  const filePath = path.join(SESSION_DIR, `${sessionId}.json`);
+  return existsSync(filePath);
+}
+
 // Initialize service
 server.post('/initialize', async (req: Request, res: Response) => {
   try {
@@ -98,10 +140,20 @@ server.post('/initialize', async (req: Request, res: Response) => {
 // Create session
 server.post('/create-session', async (req: Request, res: Response) => {
   try {
-    const { session_id, working_directory, model } = req.body;
+    const { session_id, working_directory, model, restore } = req.body;
 
     if (!session_id) {
       return res.status(400).json({ success: false, error: 'session_id required' });
+    }
+
+    // Try to load existing conversation history if restore=true
+    let conversationHistory: ConversationMessage[] = [];
+    if (restore && sessionFileExists(session_id)) {
+      const loadedHistory = loadConversationHistory(session_id);
+      if (loadedHistory) {
+        conversationHistory = loadedHistory;
+        console.log('[ClaudeAgentService] Restored', conversationHistory.length, 'messages for session:', session_id);
+      }
     }
 
     const session = {
@@ -109,7 +161,7 @@ server.post('/create-session', async (req: Request, res: Response) => {
       workingDirectory: working_directory || process.cwd(),
       model: model || defaultModel,
       permissionMode: defaultPermissionMode,
-      conversationHistory: [],
+      conversationHistory,
       createdAt: new Date().toISOString(),
       lastUsedAt: new Date().toISOString()
     };
@@ -120,10 +172,66 @@ server.post('/create-session', async (req: Request, res: Response) => {
     res.json({
       success: true,
       session_id: session_id,
-      working_directory: session.workingDirectory
+      working_directory: session.workingDirectory,
+      restored_messages: conversationHistory.length
     });
   } catch (error) {
     console.error('[ClaudeAgentService] Create session error:', error);
+    res.status(500).json({ success: false, error: (error as any)?.message || String(error) });
+  }
+});
+
+// Restore session endpoint - check if session exists and load history
+server.get('/restore-session/:session_id', async (req: Request, res: Response) => {
+  try {
+    const { session_id } = req.params;
+
+    console.log('[ClaudeAgentService] Checking for session:', session_id);
+
+    // Always check disk first for most up-to-date history
+    if (sessionFileExists(session_id)) {
+      console.log('[ClaudeAgentService] Found session file on disk for:', session_id);
+
+      // Load conversation history from disk
+      const history = loadConversationHistory(session_id);
+
+      if (history) {
+        const inMemory = sessions.has(session_id);
+        console.log('[ClaudeAgentService] Loaded', history.length, 'messages from disk. In memory:', inMemory);
+
+        return res.json({
+          success: true,
+          exists: true,
+          in_memory: inMemory,
+          message_count: history.length,
+          conversation_history: history
+        });
+      }
+    }
+
+    // Check if session exists in memory (but no disk file)
+    if (sessions.has(session_id)) {
+      const session = sessions.get(session_id)!;
+      console.log('[ClaudeAgentService] Session in memory but no disk file. Messages:', session.conversationHistory.length);
+      return res.json({
+        success: true,
+        exists: true,
+        in_memory: true,
+        message_count: session.conversationHistory.length,
+        conversation_history: session.conversationHistory
+      });
+    }
+
+    // Session not found
+    console.log('[ClaudeAgentService] No session found for:', session_id);
+    res.json({
+      success: true,
+      exists: false,
+      in_memory: false,
+      message_count: 0
+    });
+  } catch (error) {
+    console.error('[ClaudeAgentService] Restore session error:', error);
     res.status(500).json({ success: false, error: (error as any)?.message || String(error) });
   }
 });
@@ -337,6 +445,9 @@ server.post('/send-message', async (req: Request, res: Response) => {
 
       // Add assistant message to history
       session.conversationHistory.push(assistantMessage);
+
+      // Save conversation history to disk
+      saveConversationHistory(session_id, session.conversationHistory);
 
       console.log('[ClaudeAgentService] Query loop finished. Total chunks:', chunkCount);
 
